@@ -1,87 +1,58 @@
-## feedback_llm (very lightweight prototype)
+# feedback_llm
 
-This repository contains a **minimal, async feedback pipeline** for quantitative social science papers.
-It is intentionally small: one core module, a few functions, and no framework or heavy dependencies.
+A minimal, async feedback pipeline for quantitative social science papers.
 
-### What it does
+## How it works
 
-- **Generation**: 8 specialized workers (theorists, rival researchers, methodologists, editors) each propose one high-impact piece of feedback.
-- **Scoring**: Each proposal is scored on importance, specificity, actionability, and uniqueness.
-- **Critique**: High-quality proposals receive a short Delphi-style critique before synthesis.
-- **Selection (Python only)**: Proposals are ranked and classified using simple, deterministic logic
-  (no hidden logic inside prompts).
-- **Meta-review**: All high-quality proposals feed into a short meta-review plus global priorities.
+**Generation**: 8 specialized AI workers (theorists, rival researchers, methodologists, editors) review the text and propose high-impact feedback.
 
-### Design principles
+**Scoring & Critique**: Proposals are scored for importance and actionability, then scrutinized by a "discussant" layer.
 
-- **Lightweight by default**: keep the core small and inspectable.
-- **Async, but simple**: a single async pipeline, plus a small synchronous `feedback(paper_text)` wrapper.
-- **Deterministic control**: ranking, thresholds, and filtering all live in Python.
-- **Easily extensible**: prompts and thresholds can be refined without changing the overall structure.
+**Synthesis**: The highest-quality feedback is synthesized into a concise meta-review.
 
-If you add new features, **avoid bloat**:
+## Quick Start
 
-- Prefer small functions over new modules or frameworks.
-- Avoid adding heavy dependencies unless absolutely necessary.
-- Keep configuration minimal and close to the code.
+### 1. Installation
 
-### Input & output
-
-- **Input**: plain-text paper content, which can be the full manuscript or a partial excerpt (e.g., just the introduction). The generation workers are instructed to do the best possible job with whatever text they receive.
-- **Primary output**: a concise meta-review synthesizing high-quality proposals.
-- **Detailed output**: `full_feedback_pipeline` also returns raw proposals, scoring metadata, selection decisions, and a `cost_estimate` (tiktoken-based).
-- **Default models**: generation and scoring use `gpt-5`; the meta-review uses `gpt-5.1`. Adjust these in `feedback_pipeline.py` if your account prefers different models.
-
-### Quick start
-
-1. Install dependencies:
+Install the dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Set your OpenAI API key (for example in your shell):
+### 2. Setup API Key (One-time)
 
-```bash
-export OPENAI_API_KEY="sk-..."
+Create a file named `.env` in this folder and paste your OpenAI API key inside:
+
+```text
+OPENAI_API_KEY=sk-123456789...
 ```
 
-3. Use the pipeline from Python:
+(The tool loads this automatically. You can also export the key in your terminal if you prefer.)
 
-```python
-from feedback_pipeline import feedback
+### 3. Run the Tool (Easiest Way)
 
-paper_text = "... your paper text ..."
-meta_review = feedback(paper_text)
-print(meta_review)
-```
-
-For more detailed outputs (proposals, scores, and selection metadata), import and call
-`full_feedback_pipeline` from `feedback_pipeline.py`.
-
-### CLI usage
-
-You can also run the pipeline from the command line:
-
-- **From a file**:
+1. Create a file named `paper.txt` in this folder.
+2. Paste your paper text (e.g., from Overleaf) into it and save.
+3. Run:
 
 ```bash
-python -m feedback_pipeline --file path/to/paper.txt
+python -m feedback_pipeline
 ```
 
-- **Piped stdin**:
+The tool will find `paper.txt`, generate feedback, and print the meta-review to your screen.
+
+## Advanced / CLI Usage
+
+If you prefer not to use `paper.txt`, you can use flags:
 
 ```bash
-cat path/to/paper.txt | python -m feedback_pipeline
-```
+# Run on a specific file
+python -m feedback_pipeline --file drafts/my_paper.txt
 
-- **Interactive paste**:
-
-```bash
+# Interactive Paste (paste text directly into terminal)
 python -m feedback_pipeline --paste
-# Paste text, then type ::END:: on a new line and press Enter
+
+# Estimate cost (add this flag to any command)
+python -m feedback_pipeline --estimate-cost
 ```
-
-If you omit `--file` and `--paste`, the CLI will prompt automatically when run in a TTY.
-
-All commands print the meta-review to stdout while progress updates (e.g., “Generating proposals…”) stream to stderr. Add `--estimate-cost` to display an approximate token/cost breakdown based on `tiktoken`.

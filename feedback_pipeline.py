@@ -1,8 +1,24 @@
 import asyncio
 import json
+import os
 import sys
 from argparse import ArgumentParser
 from typing import Any, Dict, List, Tuple
+
+# --- Smart API Key Loading ---
+from dotenv import load_dotenv
+
+# This loads .env only if the variable isn't already set in the environment
+load_dotenv()
+
+# Safety check: Catch missing keys early so the error is readable
+if not os.getenv("OPENAI_API_KEY"):
+    print("❌ Error: OPENAI_API_KEY is missing.", file=sys.stderr)
+    print("   Please either:", file=sys.stderr)
+    print("   1. Create a file named '.env' containing: OPENAI_API_KEY=sk-...", file=sys.stderr)
+    print("   2. Or export it in your terminal.", file=sys.stderr)
+    sys.exit(1)
+# ----------------------------------
 
 import tiktoken
 from openai import AsyncOpenAI
@@ -885,7 +901,7 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--file",
         "-f",
-        help="Path to a text file containing the paper. If omitted, read from stdin.",
+        help="Path to a text file containing the paper.",
     )
     parser.add_argument(
         "--estimate-cost",
@@ -895,7 +911,7 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument(
         "--paste",
         action="store_true",
-        help="Prompt for interactive paste when no --file is provided.",
+        help="Prompt for interactive paste (forces paste mode).",
     )
     args = parser.parse_args(argv)
 
@@ -904,11 +920,31 @@ def main(argv: List[str] | None = None) -> int:
 
     sentinel = "::END::" if (args.paste or sys.stdin.isatty()) else None
 
+    # --- INPUT LOGIC START ---
+
+    # 1. Explicit file passed via CLI
     if args.file:
         paper_text = _read_paper_from_file(args.file)
+
+    # 2. Piped input (e.g. cat paper.txt | python ...)
+    elif not sys.stdin.isatty():
+        paper_text = sys.stdin.read()
+
+    # 3. Default file "paper.txt" (The Co-author Friendly Path)
+    elif os.path.exists("paper.txt"):
+        print("Found 'paper.txt'. Reading from file...", file=sys.stderr)
+        paper_text = _read_paper_from_file("paper.txt")
+
+    # 4. Fallback to interactive paste
     else:
+        print(
+            "No input provided. Paste text below (end with ::END::) OR create 'paper.txt'.",
+            file=sys.stderr,
+        )
         prompt_for_paste = args.paste or sys.stdin.isatty()
         paper_text = _read_paper_from_stdin(prompt_for_paste, sentinel=sentinel)
+
+    # --- INPUT LOGIC END ---
 
     if not paper_text.strip():
         print(
