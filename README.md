@@ -6,7 +6,9 @@ A minimal, async feedback pipeline for quantitative social science papers.
 
 **Generation**: Scalable teams of specialized AI workers (theorists, rival researchers, methodologists, editors) review the text and propose high-impact feedback. The system uses a balanced ratio of personas (e.g., 3 theorists for every 1 editor) regardless of team size.
 
-**Scoring & Critique**: Proposals are scored for importance and actionability, then scrutinized by a "discussant" layer.
+**Scoring**: Each proposal is scored twice under different prompt/order variants (rubric order and context order perturbations), then averaged to reduce judge bias.
+
+**Critique & Revision**: Top proposals receive critiques from a "discussant" layer, which then revises the proposals. Revised proposals are re-scored and used for final selection.
 
 **Synthesis**: The highest-quality feedback is synthesized into a concise meta-review.
 
@@ -46,7 +48,7 @@ The tool will find `paper.txt`, generate feedback, and print the meta-review to 
 
 You can customize the pipeline scale, model power, and synthesis depth using CLI flags.
 
-> **⚠️ Cost Warning**: Using many agents (e.g., 32+) can be very costly, especially with premium models like `gpt-5.2`. Each agent makes API calls, so costs scale linearly with the number of agents. Use `--estimate-cost` to preview costs before running, or start with fewer agents (8-16) and cheaper models (`gpt-5-mini`) to test.
+> **⚠️ Cost Warning**: Using many agents (e.g., 32+) can be very costly, especially with premium models like `gpt-5.2`. Each agent makes API calls, so costs scale linearly with the number of agents. The tool prints cost estimates by default after each run. Start with fewer agents (8-16) and cheaper models (`gpt-5-mini`) to test.
 
 ### Customizing Scale & Models
 
@@ -67,12 +69,12 @@ python -m feedback_pipeline --model gpt-5-mini --file paper.txt
 | `--agents` | Number of generation workers. | `8` | **Must be a multiple of 8** (e.g., 16, 24, 32). |
 | `--model` | OpenAI model to use. | `gpt-5` | Allowed: `gpt-5.2`, `gpt-5.1`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano`. |
 | `--top-k` | Number of proposals to synthesize. | `5` | Increase this if using high agent counts (e.g., 10 for 32 agents). |
-| `--estimate-cost` | Print token cost after running. |  |  |
+| `--no-cost-estimate` | Skip printing the cost estimate. |  | Cost estimate is printed by default. |
 
 ### Example: The "Deep Review"
 
 For a major submission, run a large-scale critique and synthesize the top 10 insights:
 
 ```bash
-python -m feedback_pipeline --file paper.txt --agents 32 --model gpt-5.2 --top-k 10 --estimate-cost
+python -m feedback_pipeline --file paper.txt --agents 32 --model gpt-5.2 --top-k 10
 ```
