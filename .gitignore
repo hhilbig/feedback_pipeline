@@ -10,6 +10,9 @@ venv/
 # Local environment variables
 .env
 
+# User input files
+paper.txt
+
 # macOS metadata
 .DS_Store
 
