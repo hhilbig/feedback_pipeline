@@ -1,12 +1,59 @@
 ## Design Overview
 
-This pipeline implements a **reviewer-ensemble architecture** designed to mimic a rigorous academic review process. Instead of relying on a single stochastic generation, we deploy scalable "blocks" of specialized agents (Theorists, Methodologists, Rival Researchers, Editors). This ensures diverse coverage of the manuscript's weaknesses—balancing conceptual logic with empirical rigor—and reduces the idiosyncratic failures common in single-shot LLM interactions (Wang et al., 2022).
+This pipeline runs a rigorous, multi-step review process similar to a high-quality academic workshop.
 
-To address the instability of LLM-based evaluation, the scoring stage is **calibrated against positional bias**. Research shows LLMs often favor content presented in specific orders (e.g., first vs. last). We mitigate this via a **dual-pass scoring mechanism**: every proposal is evaluated twice—once with the manuscript preceding the feedback, and once with the order reversed. The averaged score provides a more robust signal of quality (Wang et al., 2024; Shi et al., 2024).
+### Pipeline Flow
 
-Quality is further enhanced through an **iterative refinement loop**. High-scoring proposals are not accepted as-is; they are challenged by a separate "Discussant" agent that identifies vague claims or missing steps. The original agents then rewrite their proposals to address these critiques. This aligns with frameworks showing that explicit critique and revision significantly improve reasoning performance (Madaan et al., 2023; Gou et al., 2023). Crucially, the pipeline merges these revised outputs with the best un-revised proposals to avoid "survivor bias," ensuring the final selection represents the strongest possible set of insights.
+```
+Paper Text
+    │
+    ├─→ Generation Stage
+    │    └─→ Specialized Agents (Theorists, Methodologists, 
+    │        Rival Researchers, Editors) → Proposals
+    │
+    ├─→ Scoring Stage (Dual-Pass)
+    │    ├─→ Score with manuscript first
+    │    ├─→ Score with proposal first
+    │    └─→ Average scores to remove bias
+    │
+    ├─→ Selection Stage
+    │    └─→ Select Top-K Proposals
+    │
+    ├─→ Critique & Revision Stage
+    │    ├─→ Discussant Agent critiques top proposals
+    │    └─→ Original Agents rewrite proposals → Revised Output
+    │
+    ├─→ Re-scoring & Merging
+    │    └─→ Merge best Revised & Un-revised items
+    │
+    └─→ Synthesis Stage
+         └─→ Meta-Reviewer → Final Report
+             ├─→ Executive Summary
+             └─→ Technical Implementation Plan
+```
 
-Finally, the synthesis layer is architected to prioritize **actionability over summary**. Rather than a passive overview, the Meta-Reviewer is prompted to generate a structured **Technical Implementation Plan** with diagnostic next steps. This bridges the gap between identifying a problem (e.g., "endogeneity concern") and solving it (e.g., "run a placebo test using pre-treatment data").
+### Why this approach?
+
+**1. Strength in Numbers (Ensemble Generation)** Relying on a single AI response is often hit-or-miss. Instead, we deploy "blocks" of specialized agents (Theorists, Methodologists, Rivals). This ensures we catch different types of errors—from logical gaps to statistical flaws—and reduces the random hallucinations common in single-shot prompts (Wang et al., 2022).
+
+**2. Fair Scoring (Bias Calibration)** AI models often prefer text simply because it appears first in the prompt. We fix this "positional bias" by scoring every proposal twice: once with the manuscript first, and once with the proposal first. Averaging these scores gives a much fairer signal of quality (Wang et al., 2024; Shi et al., 2024).
+
+**3. Quality through Iteration (The Critique Loop)** First drafts are rarely perfect. Top proposals enter a "Discussant" loop where they are critiqued for vagueness or missing steps. The agents then rewrite their proposals to address these critiques. This mimics human peer review and significantly improves reasoning quality (Madaan et al., 2023).
+
+**4. Actionable Output** The final step is not just a summary. The Meta-Reviewer converts the raw feedback into a Technical Implementation Plan with specific diagnostic steps (e.g., "Run a placebo test on pre-2020 data"), bridging the gap between identifying a problem and solving it.
+
+### Scaling & Selection Details
+
+**The "Block of 8" System** To maintain a balanced perspective as you scale, agents are added in blocks of 8. Each block contains:
+
+- 3 Theorists: Focus on contribution and logic.
+- 2 Rivals: Focus on alternative explanations.
+- 2 Methodologists: Focus on empirical design.
+- 1 Editor: Focus on clarity and structure.
+
+**Scoring & Thresholds** We don't just accept everything. Proposals are ranked by a composite score: `0.35 × Importance + 0.25 × Specificity + 0.20 × Actionability + 0.20 × Uniqueness`
+
+Only "High-Quality" proposals (Composite ≥ 3.0) make it to the critique stage. This ensures the final meta-review focuses only on the strongest, most actionable insights.
 
 ### References
 
@@ -22,5 +69,4 @@ Finally, the synthesis layer is architected to prioritize **actionability over s
 
 * **Wang, X., Wei, J., Schuurmans, D., et al. (2022).** Self-Consistency Improves Chain of Thought Reasoning in Language Models. *arXiv:2203.11171*.
 
-**Repo:** [https://github.com/hhilbig/feedback_llm](https://github.com/hhilbig/feedback_llm)
-
+**Repo:** [https://github.com/hhilbig/feedback_pipeline](https://github.com/hhilbig/feedback_pipeline)
