@@ -57,16 +57,16 @@ Only "High-Quality" proposals (Composite ≥ 3.0) make it to the critique stage.
 
 ### References
 
-* **Gou, Z., Shao, Z., Gong, Y., et al. (2023).** CRITIC: Large Language Models Can Self-Correct with Tool-Interactive Critiquing. *arXiv:2305.11738*.
+- **Gou, Z., Shao, Z., Gong, Y., et al. (2023).** CRITIC: Large Language Models Can Self-Correct with Tool-Interactive Critiquing. *arXiv:2305.11738*.
 
-* **Hossain, E., Sinha, S. K., Bansal, N., et al. (2025).** LLMs as Meta-Reviewers' Assistants: A Case Study. *NAACL 2025*.
+- **Hossain, E., Sinha, S. K., Bansal, N., et al. (2025).** LLMs as Meta-Reviewers' Assistants: A Case Study. *NAACL 2025*.
 
-* **Madaan, A., Tandon, N., Gupta, P., et al. (2023).** Self-Refine: Iterative Refinement with Self-Feedback. *arXiv:2303.17651*.
+- **Madaan, A., Tandon, N., Gupta, P., et al. (2023).** Self-Refine: Iterative Refinement with Self-Feedback. *arXiv:2303.17651*.
 
-* **Shi, L., Ma, C., Liang, W., Ma, W., Vosoughi, S. (2024).** Judging the Judges: A Systematic Investigation of Position Bias in Pairwise Comparative Assessments by LLMs. *arXiv:2406.07791*.
+- **Shi, L., Ma, C., Liang, W., Ma, W., Vosoughi, S. (2024).** Judging the Judges: A Systematic Investigation of Position Bias in Pairwise Comparative Assessments by LLMs. *arXiv:2406.07791*.
 
-* **Wang, P., Li, L., Chen, L., et al. (2024).** Large Language Models are not Fair Evaluators. *ACL 2024*.
+- **Wang, P., Li, L., Chen, L., et al. (2024).** Large Language Models are not Fair Evaluators. *ACL 2024*.
 
-* **Wang, X., Wei, J., Schuurmans, D., et al. (2022).** Self-Consistency Improves Chain of Thought Reasoning in Language Models. *arXiv:2203.11171*.
+- **Wang, X., Wei, J., Schuurmans, D., et al. (2022).** Self-Consistency Improves Chain of Thought Reasoning in Language Models. *arXiv:2203.11171*.
 
 **Repo:** [https://github.com/hhilbig/feedback_pipeline](https://github.com/hhilbig/feedback_pipeline)
