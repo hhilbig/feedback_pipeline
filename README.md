@@ -12,6 +12,8 @@ A minimal, async feedback pipeline for quantitative social science papers.
 
 **Synthesis**: The highest-quality feedback is synthesized into a structured meta-review containing an **Executive Summary** (prioritized headlines) and a **Technical Implementation Plan** (diagnostic steps).
 
+For more details on the architecture and design rationale, see [DESIGN.md](DESIGN.md).
+
 ## Quick Start
 
 ### 1. Installation
