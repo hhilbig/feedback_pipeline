@@ -23,7 +23,12 @@ if not os.getenv("OPENAI_API_KEY"):
     sys.exit(1)
 # ----------------------------------
 
-import tiktoken
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+
 from openai import AsyncOpenAI
 
 
@@ -79,10 +84,12 @@ def _lookup_pricing_model(model: str) -> Dict[str, float]:
     return MODEL_PRICING[model]
 
 
-_ENCODER_CACHE: Dict[str, tiktoken.Encoding] = {}
+_ENCODER_CACHE: Dict[str, Any] = {}
 
 
-def _encoding_for_model(model: str) -> tiktoken.Encoding:
+def _encoding_for_model(model: str):
+    if not TIKTOKEN_AVAILABLE:
+        return None
     encoding = _ENCODER_CACHE.get(model)
     if encoding is not None:
         return encoding
@@ -95,6 +102,9 @@ def _encoding_for_model(model: str) -> tiktoken.Encoding:
 
 
 def _count_text_tokens(text: str, model: str) -> int:
+    if not TIKTOKEN_AVAILABLE:
+        # Rough estimate: ~4 chars per token
+        return len(text) // 4
     return len(_encoding_for_model(model).encode(text))
 
 
@@ -1178,28 +1188,38 @@ async def full_feedback_pipeline(
     paper_text: str,
     num_agents: int = 8,
     gen_model: str = "gpt-5",
-    top_k: int = 5,  # New default
+    top_k: int = 5,
+    progress_callback: Any = None,
 ) -> Dict[str, Any]:
-    """Run the full async feedback pipeline for a single paper."""
+    """Run the full async feedback pipeline for a single paper.
+
+    Args:
+        progress_callback: Optional callable(step: int, total: int, message: str)
+    """
+
+    def report_progress(step: int, total: int, message: str):
+        _progress(message)
+        if progress_callback:
+            progress_callback(step, total, message)
+
+    total_steps = 6  # Generation, Scoring, Critique, Revision, Re-scoring, Meta-review
 
     # 1. Create workers dynamically
     workers = create_worker_assignments(num_agents)
 
-    _progress(f"Generating proposals with {num_agents} agents using {gen_model}…")
+    report_progress(1, total_steps, f"Generating proposals with {num_agents} agents...")
     proposals = await generate_all_proposals(paper_text, workers, gen_model)
 
-    _progress("Scoring proposals…")
+    report_progress(2, total_steps, "Scoring proposals (dual-pass for bias removal)...")
     scored = await score_all_proposals(paper_text, proposals)
 
-    _progress(f"Selecting Top-{top_k} feedback…")
-    # Pass top_k here
     selection = select_and_classify(scored, top_k)
 
-    _progress("Running critique round…")
+    report_progress(3, total_steps, "Running critique round...")
     critiques = await run_critique_round(paper_text, selection.get("high_quality", []))
     selection["critiques"] = critiques
 
-    _progress("Revising top proposals based on critiques…")
+    report_progress(4, total_steps, "Revising proposals based on critiques...")
     revise_k = min(top_k, len(selection.get("high_quality", [])))
     revised = await run_revision_round(
         paper_text,
@@ -1210,7 +1230,7 @@ async def full_feedback_pipeline(
     )
 
     if revised:
-        _progress("Re-scoring revised proposals…")
+        report_progress(5, total_steps, "Re-scoring revised proposals...")
         scored_revised = await score_all_proposals(paper_text, revised)
         revised_ids = {p["id"] for p in scored_revised}
 
@@ -1222,9 +1242,10 @@ async def full_feedback_pipeline(
         selection_revised["critiques"] = critiques
         selection_revised["original_high_quality"] = selection["high_quality"]
         selection = selection_revised
+    else:
+        report_progress(5, total_steps, "No revisions needed, skipping re-scoring...")
 
-    _progress("Writing meta-review…")
-    # Pass top_k here
+    report_progress(6, total_steps, "Synthesizing meta-review...")
     meta = await meta_review(selection, top_k)
 
     result = {
@@ -1259,6 +1280,59 @@ __all__ = [
     "meta_review",
     "estimate_pipeline_cost",
 ]
+
+
+def _read_from_clipboard() -> str:
+    """Read text from system clipboard using pyperclip."""
+    try:
+        import pyperclip
+    except ImportError:
+        print(
+            "❌ Error: pyperclip is not installed. Run: pip install pyperclip",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        text = pyperclip.paste()
+        if not text:
+            print("❌ Error: Clipboard is empty.", file=sys.stderr)
+            sys.exit(1)
+        return text
+    except pyperclip.PyperclipException as e:
+        print(f"❌ Error reading clipboard: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _extract_from_pdf(path: str) -> str:
+    """Extract text from PDF using PyMuPDF."""
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        print(
+            "❌ Error: pymupdf is not installed. Run: pip install pymupdf",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not os.path.exists(path):
+        print(f"❌ Error: PDF file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        doc = fitz.open(path)
+        text_parts = []
+        for page in doc:
+            text_parts.append(page.get_text())
+        doc.close()
+        text = "\n".join(text_parts)
+        if not text.strip():
+            print(
+                "❌ Error: Could not extract text from PDF (may be scanned/image-based).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return text
+    except Exception as e:
+        print(f"❌ Error reading PDF: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _read_paper_from_stdin(
@@ -1343,6 +1417,18 @@ def main(argv: List[str] | None = None) -> int:
         help="Prompt for interactive paste (forces paste mode).",
     )
     parser.add_argument(
+        "--clipboard",
+        "-c",
+        action="store_true",
+        help="Read paper text from system clipboard.",
+    )
+    parser.add_argument(
+        "--pdf",
+        "-p",
+        type=str,
+        help="Extract text from a PDF file.",
+    )
+    parser.add_argument(
         "--agents", type=int, default=8, help="Number of agents (must be multiple of 8)"
     )
     parser.add_argument(
@@ -1356,8 +1442,15 @@ def main(argv: List[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if args.file and args.paste:
-        parser.error("--paste cannot be used together with --file")
+    # Validate mutually exclusive input sources
+    input_sources = sum([
+        bool(args.file),
+        bool(args.paste),
+        bool(args.clipboard),
+        bool(args.pdf),
+    ])
+    if input_sources > 1:
+        parser.error("Only one input source allowed: --file, --paste, --clipboard, or --pdf")
 
     sentinel = "::END::" if (args.paste or sys.stdin.isatty()) else None
 
@@ -1367,16 +1460,26 @@ def main(argv: List[str] | None = None) -> int:
     if args.file:
         paper_text = _read_paper_from_file(args.file)
 
-    # 2. Piped input (e.g. cat paper.txt | python ...)
+    # 2. Clipboard
+    elif args.clipboard:
+        print("Reading from clipboard...", file=sys.stderr)
+        paper_text = _read_from_clipboard()
+
+    # 3. PDF file
+    elif args.pdf:
+        print(f"Extracting text from PDF: {args.pdf}", file=sys.stderr)
+        paper_text = _extract_from_pdf(args.pdf)
+
+    # 4. Piped input (e.g. cat paper.txt | python ...)
     elif not sys.stdin.isatty():
         paper_text = sys.stdin.read()
 
-    # 3. Default file "paper.txt" (The Co-author Friendly Path)
+    # 5. Default file "paper.txt" (The Co-author Friendly Path)
     elif os.path.exists("paper.txt"):
         print("Found 'paper.txt'. Reading from file...", file=sys.stderr)
         paper_text = _read_paper_from_file("paper.txt")
 
-    # 4. Fallback to interactive paste
+    # 6. Fallback to interactive paste
     else:
         print(
             "No input provided. Paste text below (end with ::END::) OR create 'paper.txt'.",

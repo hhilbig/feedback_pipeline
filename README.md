@@ -1,82 +1,104 @@
-# feedback_pipeline
+# Paper Feedback Pipeline
 
-A minimal, async feedback pipeline for quantitative social science papers.
+Get AI-powered feedback on your quantitative social science paper. Multiple specialized AI reviewers analyze your work and synthesize their insights into actionable feedback.
 
-## How it works
+## Getting Started
 
-**Generation**: Specialized agents (Theorists, Methodologists, Rival Researchers, Editors) review the text and propose high-impact feedback. Agents are organized in blocks of 8 (3 Theorists, 2 Rivals, 2 Methodologists, 1 Editor) to maintain balanced perspectives as you scale.
+### Step 1: Get an OpenAI API Key
 
-**Scoring**: Each proposal is scored twice—once with the manuscript first, and once with the proposal first—then averaged to remove positional bias.
+1. Go to [platform.openai.com](https://platform.openai.com)
+2. Sign up or log in
+3. Go to API Keys and create a new key
+4. Copy the key (starts with `sk-...`)
 
-**Critique & Revision**: Top proposals receive critiques from a Discussant Agent, which then revises the proposals. Revised proposals are re-scored and merged with the best un-revised proposals for final selection.
+### Step 2: Save Your API Key
 
-**Synthesis**: The highest-quality feedback is synthesized into a structured meta-review containing an **Executive Summary** (prioritized headlines) and a **Technical Implementation Plan** (diagnostic steps).
+Open the folder containing this tool and create a new file called `.env` (just `.env`, no other name).
 
-For more details on the architecture and design rationale, see [DESIGN.md](DESIGN.md).
+Inside the file, paste this line with your actual key:
+```
+OPENAI_API_KEY=sk-your-key-here
+```
 
-## Quick Start
+Save the file.
 
-### 1. Installation
+### Step 3: Run the App
 
-Install the dependencies:
+**Double-click `run_app.command`**
+
+That's it! A browser window will open with the app.
+
+- First time: It will take 1-2 minutes to set up (you'll see progress in the terminal)
+- After that: It starts in a few seconds
+
+### Step 4: Use the App
+
+1. Paste your paper text OR upload a PDF
+2. Adjust settings if you want (sidebar)
+3. Click "Generate Feedback"
+4. Wait a few minutes while the AI reviews your paper
+5. Read your feedback!
+
+---
+
+## How It Works
+
+The tool runs your paper through a simulated review panel:
+
+1. **8 AI reviewers** read your paper (Theorists, Methodologists, Rival Researchers, Editors)
+2. Each proposes their single most important critique
+3. Proposals are **scored** for importance, specificity, and actionability
+4. Top proposals go through a **revision round** to sharpen the feedback
+5. A **meta-reviewer** synthesizes everything into a final report
+
+Click "How it works" in the app for a detailed diagram.
+
+---
+
+## Settings
+
+In the sidebar, you can adjust:
+
+| Setting | What it does |
+|---------|--------------|
+| **Model** | Smarter models cost more but may give better feedback |
+| **Number of Agents** | More agents = more diverse perspectives, but higher cost |
+| **Top-K Proposals** | How many top insights to include in the final review |
+
+**Cost note**: Each run costs money (paid to OpenAI). Start with default settings to test. The app shows a cost estimate after each run.
+
+---
+
+## Troubleshooting
+
+**"OPENAI_API_KEY not found"**
+- Make sure you created the `.env` file in the same folder as the app
+- Make sure the file contains `OPENAI_API_KEY=sk-...` (no spaces around the `=`)
+
+**App won't start / "command not found"**
+- Make sure you have Python 3 installed
+- On Mac: Open Terminal and run `python3 --version` to check
+
+**PDF upload doesn't work**
+- Some PDFs are scanned images, not text. Try pasting the text instead.
+
+---
+
+## Advanced: Command Line
+
+If you prefer the terminal:
 
 ```bash
-pip install -r requirements.txt
+# Activate the virtual environment first
+source .venv/bin/activate
+
+# Run with different input methods
+python -m feedback_pipeline --clipboard      # reads from clipboard
+python -m feedback_pipeline --pdf paper.pdf  # reads from PDF
+python -m feedback_pipeline --file paper.txt # reads from text file
+
+# Customize the run
+python -m feedback_pipeline --agents 16 --model gpt-5.2 --top-k 10 --file paper.txt
 ```
 
-### 2. Setup API Key (One-time)
-
-Create a file named `.env` in this folder and paste your OpenAI API key inside:
-
-```text
-OPENAI_API_KEY=sk-123456789...
-```
-
-(The tool loads this automatically. You can also export the key in your terminal if you prefer.)
-
-### 3. Run the Tool (Easiest Way)
-
-1. Create a file named `paper.txt` in this folder.
-2. Paste your paper text (e.g., from Overleaf) into it and save.
-3. Run:
-
-```bash
-python -m feedback_pipeline
-```
-
-The tool will find `paper.txt`, generate feedback, and print the meta-review to your screen.
-
-## Advanced Usage & Customization
-
-You can customize the pipeline scale, model power, and synthesis depth using CLI flags.
-
-> **⚠️ Cost Warning**: Using many agents (e.g., 32+) can be very costly, especially with premium models like `gpt-5.2`. Each agent makes API calls, so costs scale linearly with the number of agents. The tool prints cost estimates by default after each run. Start with fewer agents (8-16) and cheaper models (`gpt-5-mini`) to test.
-
-### Customizing Scale & Models
-
-```bash
-# Power Run: Use 32 agents and the stronger GPT-5.2 model
-python -m feedback_pipeline --agents 32 --model gpt-5.2 --file paper.txt
-
-# Budget Run: Use 8 agents (default) and the cheaper GPT-5-mini
-python -m feedback_pipeline --model gpt-5-mini --file paper.txt
-```
-
-### All Available Flags
-
-| Flag | Description | Default | Notes |
-| --- | --- | --- | --- |
-| `--file` | Path to input text file. | `paper.txt` |  |
-| `--paste` | Paste text directly into terminal. |  | Cannot use with `--file`. |
-| `--agents` | Number of generation workers. | `8` | **Must be a multiple of 8** (e.g., 16, 24, 32). |
-| `--model` | OpenAI model to use. | `gpt-5` | Allowed: `gpt-5.2`, `gpt-5.1`, `gpt-5`, `gpt-5-mini`, `gpt-5-nano`. |
-| `--top-k` | Number of proposals to synthesize. | `5` | Increase this if using high agent counts (e.g., 10 for 32 agents). |
-| `--no-cost-estimate` | Skip printing the cost estimate. |  | Cost estimate is printed by default. |
-
-### Example: The "Deep Review"
-
-For a major submission, run a large-scale critique and synthesize the top 10 insights:
-
-```bash
-python -m feedback_pipeline --file paper.txt --agents 32 --model gpt-5.2 --top-k 10
-```
+See [DESIGN.md](DESIGN.md) for technical details on the pipeline architecture.
