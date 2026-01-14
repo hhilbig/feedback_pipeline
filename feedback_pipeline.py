@@ -420,7 +420,12 @@ Before writing the final list, perform an explicit prioritization step:
 - Balance two goals: (1) conceptual/logical soundness (theory, assumptions, alternative explanations) and (2) empirical validity (identification, statistical interpretation).
 - Select the three to five most important revisions (default to three unless additional issues are truly distinct). You MUST include at least one conceptual/logical flaw if any such proposals exist. Do not simply choose the empirically strongest points.
 
-Then provide a numbered list of the prioritized revisions, ordered from most to least important. Base this list primarily on your balanced prioritization, weaving in unique proposals when they surface distinct, valuable issues. Use an inquisitive tone where appropriate.
+Then provide a numbered list of prioritized revisions (3-5 items). For each revision:
+- Start with an action verb (e.g., "Add...", "Rewrite...", "Clarify...", "Run...")
+- Mark as [REQUIRED] (undermines core contribution/validity if not fixed) or [SUGGESTED] (strengthens but not essential)
+- If a revision involves multiple related changes, use lettered sub-items (a, b, c) rather than joining with "and"
+- Include a one-sentence justification after each main item
+- Use an inquisitive tone where appropriate
 
 Do not restate the prioritized list verbatim inside the four sections; use the sections to add diagnostic detail, boundary conditions, and conflict resolution.
 
@@ -441,9 +446,14 @@ All high-quality proposals (for prioritization):
 {json.dumps(all_high_quality_payload)}
 ```
 
-Crucially, for each prioritized revision, include a one-sentence justification explaining why it was prioritized (impact, logical priority, or risk). For example:
-1. [Revision text?] *Justification: Addresses a foundational gap in the paper's core argument.*
-2. [Revision text?] *Justification: Resolves a critical interpretive error in the main empirical claim.*
+Example format:
+1. [REQUIRED] Clarify the treatment definition in Section 3.
+   a. Add a paragraph specifying the exact timing of treatment assignment
+   b. Rewrite the estimand to distinguish coverage from cooperation
+   *Justification: Resolves ambiguity that could lead to misinterpretation of the causal claim.*
+
+2. [SUGGESTED] Run placebo tests on pre-treatment periods.
+   *Justification: Would strengthen the parallel trends assumption, though current evidence is reasonable.*
 """.strip()
 
     return [
@@ -876,6 +886,81 @@ async def meta_review(selection: Dict[str, Any], top_k: int) -> str:
 # -------------------------------------------------------------------
 
 
+def estimate_cost_before_run(
+    paper_text: str,
+    num_agents: int = 8,
+    gen_model: str = "gpt-5",
+    top_k: int = 5,
+) -> Dict[str, Any]:
+    """Estimate cost BEFORE running the pipeline.
+
+    This gives a rough estimate based on:
+    - Known prompt templates
+    - Paper text length
+    - Estimated output sizes
+    """
+    # Create mock workers to get persona prompts
+    workers = create_worker_assignments(num_agents)
+
+    # Estimate generation stage
+    gen_prompt_tokens = 0
+    for worker in workers:
+        messages = _generation_messages(worker["persona"], paper_text, worker["id"])
+        gen_prompt_tokens += _count_message_tokens(messages, gen_model)
+    gen_completion_tokens = num_agents * 150  # ~100 words + JSON overhead per proposal
+
+    # Estimate scoring stage (2 passes per proposal)
+    # Each scoring prompt includes paper + proposal text
+    sample_proposal_text = "Problem: This is a sample proposal text of about one hundred words that represents typical feedback length for estimation purposes." * 2
+    scoring_messages = _scoring_messages(paper_text, sample_proposal_text, "contribution")
+    single_score_prompt = _count_message_tokens(scoring_messages, SCORING_MODEL)
+    score_prompt_tokens = 2 * num_agents * single_score_prompt  # 2 passes
+    score_completion_tokens = 2 * num_agents * 50  # ~50 tokens per score response
+
+    # Estimate critique stage (assume all proposals are high quality = worst case)
+    critique_prompt_tokens = num_agents * (single_score_prompt + 200)  # Similar to scoring + overhead
+    critique_completion_tokens = num_agents * 100  # ~100 tokens per critique
+
+    # Estimate revision stage (top_k revisions)
+    revision_prompt_tokens = top_k * (single_score_prompt + 300)
+    revision_completion_tokens = top_k * 150
+
+    # Estimate re-scoring (2 passes for revised proposals)
+    rescore_prompt_tokens = 2 * top_k * single_score_prompt
+    rescore_completion_tokens = 2 * top_k * 50
+
+    # Estimate meta-review (1 call with all proposals)
+    meta_prompt_tokens = _count_text_tokens(paper_text, META_MODEL) + num_agents * 200 + 500
+    meta_completion_tokens = 800  # Typical meta-review length
+
+    # Calculate costs
+    gen_pricing = _lookup_pricing_model(gen_model)
+    score_pricing = _lookup_pricing_model(SCORING_MODEL)
+    meta_pricing = _lookup_pricing_model(META_MODEL)
+
+    gen_cost = gen_prompt_tokens * gen_pricing["input"] + gen_completion_tokens * gen_pricing["output"]
+    score_cost = score_prompt_tokens * score_pricing["input"] + score_completion_tokens * score_pricing["output"]
+    critique_cost = critique_prompt_tokens * gen_pricing["input"] + critique_completion_tokens * gen_pricing["output"]
+    revision_cost = revision_prompt_tokens * gen_pricing["input"] + revision_completion_tokens * gen_pricing["output"]
+    rescore_cost = rescore_prompt_tokens * score_pricing["input"] + rescore_completion_tokens * score_pricing["output"]
+    meta_cost = meta_prompt_tokens * meta_pricing["input"] + meta_completion_tokens * meta_pricing["output"]
+
+    total_cost = gen_cost + score_cost + critique_cost + revision_cost + rescore_cost + meta_cost
+
+    return {
+        "estimated_total_cost_usd": total_cost,
+        "stages": {
+            "generation": {"cost_usd": gen_cost, "prompt_tokens": gen_prompt_tokens, "completion_tokens": gen_completion_tokens},
+            "scoring": {"cost_usd": score_cost, "prompt_tokens": score_prompt_tokens, "completion_tokens": score_completion_tokens},
+            "critique": {"cost_usd": critique_cost, "prompt_tokens": critique_prompt_tokens, "completion_tokens": critique_completion_tokens},
+            "revision": {"cost_usd": revision_cost, "prompt_tokens": revision_prompt_tokens, "completion_tokens": revision_completion_tokens},
+            "re_scoring": {"cost_usd": rescore_cost, "prompt_tokens": rescore_prompt_tokens, "completion_tokens": rescore_completion_tokens},
+            "meta_review": {"cost_usd": meta_cost, "prompt_tokens": meta_prompt_tokens, "completion_tokens": meta_completion_tokens},
+        },
+        "note": "This is an estimate. Actual cost may vary based on proposal quality and lengths."
+    }
+
+
 def _stage_cost_summary(
     prompt_tokens: int,
     completion_tokens: int,
@@ -1279,6 +1364,7 @@ __all__ = [
     "select_and_classify",
     "meta_review",
     "estimate_pipeline_cost",
+    "estimate_cost_before_run",
 ]
 
 

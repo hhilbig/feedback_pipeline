@@ -177,6 +177,19 @@ can_run = bool(paper_text.strip())
 
 if not paper_text.strip():
     st.info("Provide paper text above to continue.")
+else:
+    # Show cost estimate before running
+    from feedback_pipeline import estimate_cost_before_run
+
+    estimate = estimate_cost_before_run(
+        paper_text,
+        num_agents=agents,
+        gen_model=model,
+        top_k=top_k,
+    )
+    estimated_cost = estimate["estimated_total_cost_usd"]
+
+    st.info(f"**Estimated cost: ${estimated_cost:.2f}** (actual cost may vary)")
 
 if st.button("Generate Feedback", type="primary", disabled=not can_run):
     from feedback_pipeline import full_feedback_pipeline, _format_cost_estimate
