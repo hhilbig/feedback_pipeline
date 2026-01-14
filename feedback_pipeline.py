@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from argparse import ArgumentParser
+from collections import defaultdict
 from typing import Any, Dict, List, Tuple
 
 # --- Smart API Key Loading ---
@@ -29,7 +30,7 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError, APIConnectionError, APITimeoutError
 
 
 """
@@ -339,6 +340,14 @@ META_SYSTEM_PROMPT = (
 
 
 def _meta_messages(selection: Dict[str, Any], top_k: int) -> List[Dict[str, str]]:
+    def _calc_agreement(p: dict) -> float:
+        """Convert judge_disagreement dict to 0-1 agreement score."""
+        disagree = p.get("judge_disagreement", {})
+        if not disagree:
+            return 1.0  # No disagreement data = assume agreement
+        avg_disagree = sum(disagree.values()) / len(disagree)  # 0-4 scale
+        return round(1 - (avg_disagree / 4), 2)  # Convert to 0-1 agreement
+
     by_dim_payload = {
         dim: [
             {
@@ -349,6 +358,7 @@ def _meta_messages(selection: Dict[str, Any], top_k: int) -> List[Dict[str, str]
                 "actionability": p["actionability"],
                 "uniqueness": p["uniqueness"],
                 "composite": p["composite"],
+                "reviewer_agreement": _calc_agreement(p),
             }
             for p in plist
         ]
@@ -363,6 +373,7 @@ def _meta_messages(selection: Dict[str, Any], top_k: int) -> List[Dict[str, str]
             "dimension": p["dimension"],
             "text": p["text"],
             "composite": p["composite"],
+            "reviewer_agreement": _calc_agreement(p),
         }
         for p in top_global
     ]
@@ -375,6 +386,7 @@ def _meta_messages(selection: Dict[str, Any], top_k: int) -> List[Dict[str, str]
             "text": p["text"],
             "uniqueness": p["uniqueness"],
             "composite": p["composite"],
+            "reviewer_agreement": _calc_agreement(p),
         }
         for p in selection.get("sorted_by_uniqueness", [])[:top_k]
     ]
@@ -390,6 +402,7 @@ def _meta_messages(selection: Dict[str, Any], top_k: int) -> List[Dict[str, str]
             "actionability": p["actionability"],
             "uniqueness": p["uniqueness"],
             "composite": p["composite"],
+            "reviewer_agreement": _calc_agreement(p),
         }
         for p in selection.get("high_quality", [])
     ]
@@ -414,6 +427,10 @@ For each section:
 - If there are no proposals for that dimension, write 1–2 sentences indicating that no major issues were flagged there.
 
 Consider both the globally strongest proposals and the most unique proposals so that high-impact but novel insights are not overlooked.
+
+Each proposal includes a reviewer_agreement score (0-1) indicating consensus among scoring passes:
+- High agreement (>0.75): Confident assessment; prioritize these issues.
+- Low agreement (<0.5): Contested assessment; note uncertainty when including.
 
 Before writing the final list, perform an explicit prioritization step:
 - Review all high-quality proposals below.
@@ -556,6 +573,25 @@ async def chat_json(
     return json.loads(content)
 
 
+async def chat_json_with_retry(
+    messages: List[Dict[str, str]],
+    model: str = GENERATION_MODEL,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+) -> Any:
+    """chat_json with exponential backoff retry for transient errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return await chat_json(messages, model)
+        except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # 1s, 2s, 4s
+                await asyncio.sleep(delay)
+    raise last_error
+
+
 # -------------------------------------------------------------------
 # 1. Independent generation workers
 # -------------------------------------------------------------------
@@ -577,29 +613,37 @@ async def generate_all_proposals(
     paper_text: str,
     workers: List[Dict[str, Any]],  # CHANGED: Now accepts specific worker list
     model: str,  # CHANGED: Now accepts specific model
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Generate proposals with partial failure recovery.
 
+    Returns:
+        Tuple of (successful_proposals, failed_workers).
+        Failed workers contain {"worker": worker_dict, "error": str}.
+    """
     tasks = []
     for assignment in workers:
         messages = _generation_messages(
             assignment["persona"], paper_text, assignment["id"]
         )
-
-        # We call chat_json explicitly with the chosen model
-        task = chat_json(messages, model=model)
+        # Use retry wrapper for transient errors
+        task = chat_json_with_retry(messages, model=model)
         tasks.append(task)
 
-    # Gather results and re-attach IDs (since order is preserved in gather)
-    raw_results = await asyncio.gather(*tasks)
+    # Gather with return_exceptions=True for partial recovery
+    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    formatted_results = []
+    successful = []
+    failed = []
     for i, result in enumerate(raw_results):
         worker = workers[i]
-        result["id"] = worker["id"]
-        result["persona"] = worker["persona"]
-        formatted_results.append(result)
+        if isinstance(result, Exception):
+            failed.append({"worker": worker, "error": str(result)})
+        else:
+            result["id"] = worker["id"]
+            result["persona"] = worker["persona"]
+            successful.append(result)
 
-    return formatted_results
+    return successful, failed
 
 
 # -------------------------------------------------------------------
@@ -612,7 +656,7 @@ async def score_single_proposal_two_pass(
     proposal: Dict[str, Any],
 ) -> Dict[str, Any]:
     # Pass 1: canonical order
-    p1 = await chat_json(
+    p1 = await chat_json_with_retry(
         [
             {"role": "system", "content": SCORING_SYSTEM_PROMPT},
             {
@@ -635,7 +679,7 @@ async def score_single_proposal_two_pass(
     )
 
     # Pass 2: reversed rubric order + swapped context
-    p2 = await chat_json(
+    p2 = await chat_json_with_retry(
         [
             {"role": "system", "content": SCORING_SYSTEM_PROMPT},
             {
@@ -705,7 +749,7 @@ async def critique_single_proposal(
     proposal: Dict[str, Any],
 ) -> Dict[str, Any]:
     messages = _critic_messages(paper_text, proposal)
-    critique = await chat_json(messages, model=GENERATION_MODEL)
+    critique = await chat_json_with_retry(messages, model=GENERATION_MODEL)
     critique["original_id"] = proposal.get("id")
     return critique
 
@@ -795,7 +839,7 @@ async def revise_single_proposal(
     model: str = GENERATION_MODEL,
 ) -> Dict[str, Any]:
     messages = _revision_messages(paper_text, proposal, critique_text)
-    revised = await chat_json(messages, model=model)
+    revised = await chat_json_with_retry(messages, model=model)
     revised["id"] = proposal["id"]
     revised["persona"] = proposal.get("persona")
     revised["original_text"] = proposal.get("text", "")
@@ -820,6 +864,50 @@ async def run_revision_round(
     return await asyncio.gather(*tasks) if tasks else []
 
 
+def _proposal_similarity(p1: Dict[str, Any], p2: Dict[str, Any]) -> float:
+    """Jaccard similarity on problem text words."""
+    text1 = p1.get("text", "") or p1.get("problem", "")
+    text2 = p2.get("text", "") or p2.get("problem", "")
+    words1 = set(text1.lower().split())
+    words2 = set(text2.lower().split())
+    if not words1 or not words2:
+        return 0.0
+    return len(words1 & words2) / len(words1 | words2)
+
+
+def deduplicate_proposals(
+    proposals: List[Dict[str, Any]],
+    similarity_threshold: float = 0.5,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Remove near-duplicate proposals, keeping highest composite score.
+
+    Returns:
+        Tuple of (deduplicated_proposals, num_removed).
+    """
+    # Group by dimension first
+    by_dim = defaultdict(list)
+    for p in proposals:
+        by_dim[p.get("dimension", "unknown")].append(p)
+
+    deduplicated = []
+    for dim, dim_proposals in by_dim.items():
+        # Sort by composite descending to keep best
+        sorted_props = sorted(dim_proposals, key=lambda x: x.get("composite", 0), reverse=True)
+        kept = []
+        for p in sorted_props:
+            # Check if too similar to any kept proposal
+            is_duplicate = any(
+                _proposal_similarity(p, k) > similarity_threshold
+                for k in kept
+            )
+            if not is_duplicate:
+                kept.append(p)
+        deduplicated.extend(kept)
+
+    num_removed = len(proposals) - len(deduplicated)
+    return deduplicated, num_removed
+
+
 def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, Any]:
     # Sort by composite, descending
     sorted_by_composite = sorted(scored, key=lambda x: x["composite"], reverse=True)
@@ -842,6 +930,9 @@ def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, A
         or (p["importance"] >= IMPORTANCE_THRESHOLD)
     ]
 
+    # Deduplicate to remove near-identical proposals (keeps highest composite)
+    high_quality, num_deduplicated = deduplicate_proposals(high_quality)
+
     # Also rank high-quality proposals by uniqueness to surface novel ideas
     sorted_by_uniqueness = sorted(
         high_quality,
@@ -863,6 +954,7 @@ def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, A
         "low_value_ids": low_value_ids,
         "high_quality": high_quality,
         "by_dimension": by_dimension,
+        "num_deduplicated": num_deduplicated,
     }
     return selection
 
@@ -874,11 +966,19 @@ def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, A
 
 async def meta_review(selection: Dict[str, Any], top_k: int) -> str:
     messages = _meta_messages(selection, top_k)
-    resp = await client.chat.completions.create(
-        model=META_MODEL,
-        messages=messages,
-    )
-    return resp.choices[0].message.content
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = await client.chat.completions.create(
+                model=META_MODEL,
+                messages=messages,
+            )
+            return resp.choices[0].message.content
+        except (RateLimitError, APIConnectionError, APITimeoutError) as e:
+            last_error = e
+            if attempt < 2:
+                await asyncio.sleep(1 * (2 ** attempt))
+    raise last_error
 
 
 # -------------------------------------------------------------------
@@ -1293,7 +1393,12 @@ async def full_feedback_pipeline(
     workers = create_worker_assignments(num_agents)
 
     report_progress(1, total_steps, f"Generating proposals with {num_agents} agents...")
-    proposals = await generate_all_proposals(paper_text, workers, gen_model)
+    proposals, failed_generations = await generate_all_proposals(paper_text, workers, gen_model)
+
+    if failed_generations:
+        print(f"Warning: {len(failed_generations)} of {num_agents} proposal generations failed", file=sys.stderr)
+    if not proposals:
+        raise ValueError("All proposal generations failed. Check your API key and network connection.")
 
     report_progress(2, total_steps, "Scoring proposals (dual-pass for bias removal)...")
     scored = await score_all_proposals(paper_text, proposals)
