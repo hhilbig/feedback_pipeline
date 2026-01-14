@@ -17,7 +17,8 @@ Paper Text
     │    └─→ Average scores to remove bias
     │
     ├─→ Selection Stage
-    │    └─→ Select Top-K Proposals
+    │    ├─→ Filter by quality thresholds
+    │    └─→ Deduplicate similar proposals
     │
     ├─→ Critique & Revision Stage
     │    ├─→ Discussant Agent critiques top proposals
@@ -54,6 +55,16 @@ Paper Text
 **Scoring & Thresholds** We don't just accept everything. Proposals are ranked by a composite score: `0.35 × Importance + 0.25 × Specificity + 0.20 × Actionability + 0.20 × Uniqueness`
 
 Only "High-Quality" proposals (Composite ≥ 3.0) make it to the critique stage. This ensures the final meta-review focuses only on the strongest, most actionable insights.
+
+**Deduplication** Multiple agents from the same role (e.g., 3 Theorists) often flag similar issues. Before the critique stage, we remove near-duplicate proposals using word overlap (Jaccard similarity > 50% within the same dimension), keeping only the highest-scoring version. This reduces redundancy and saves API costs.
+
+**Reviewer Agreement Signal** The dual-pass scoring produces not just averaged scores, but also a measure of agreement between passes. This "reviewer agreement" score (0-1) is passed to the meta-reviewer, who prioritizes high-consensus issues and notes uncertainty for contested assessments.
+
+### Reliability Features
+
+**Retry with Backoff** All API calls retry up to 3 times with exponential backoff (1s, 2s, 4s) on rate limits, timeouts, and connection errors.
+
+**Partial Failure Recovery** If some proposal generations fail, the pipeline continues with successful results rather than crashing entirely.
 
 ### References
 
