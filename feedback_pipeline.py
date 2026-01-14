@@ -416,7 +416,7 @@ Dimensions:
 - interpretation
 - writing_structure
 
-Write a meta-review with four sections, in this order:
+Start your response with a markdown heading "## Narrative Summary", then write four sections:
 1. Contribution
 2. Logical soundness of the argument
 3. Interpretation of empirical results
@@ -437,7 +437,7 @@ Before writing the final list, perform an explicit prioritization step:
 - Balance two goals: (1) conceptual/logical soundness (theory, assumptions, alternative explanations) and (2) empirical validity (identification, statistical interpretation).
 - Select the three to five most important revisions (default to three unless additional issues are truly distinct). You MUST include at least one conceptual/logical flaw if any such proposals exist. Do not simply choose the empirically strongest points.
 
-Then provide a numbered list of prioritized revisions (3-5 items). For each revision:
+Then write a markdown heading "## Proposed Revisions" followed by a numbered list of prioritized revisions (3-5 items). For each revision:
 - Start with an action verb (e.g., "Add...", "Rewrite...", "Clarify...", "Run...")
 - Mark as [REQUIRED] (undermines core contribution/validity if not fixed) or [SUGGESTED] (strengthens but not essential)
 - If a revision involves multiple related changes, use lettered sub-items (a, b, c) rather than joining with "and"
