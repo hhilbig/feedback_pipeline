@@ -221,6 +221,26 @@ if st.button("Generate Feedback", type="primary", disabled=not can_run):
         st.header("3. Results")
         st.markdown(result["meta_review"])
 
+        # Export options
+        meta_review_text = result["meta_review"]
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="Download as Markdown",
+                data=meta_review_text,
+                file_name="feedback.md",
+                mime="text/markdown",
+            )
+        with col2:
+            # Copy to clipboard using pyperclip
+            if st.button("Copy to Clipboard"):
+                try:
+                    import pyperclip
+                    pyperclip.copy(meta_review_text)
+                    st.success("Copied to clipboard!")
+                except Exception:
+                    st.error("Could not copy. Try the download button instead.")
+
         # Display cost estimate
         cost = result.get("cost_estimate")
         if cost:
