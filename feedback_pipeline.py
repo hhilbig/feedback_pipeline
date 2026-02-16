@@ -428,8 +428,9 @@ Start your response with a markdown heading "## Narrative Summary", then write f
 4. Writing and structure
 
 For each section:
-- If there are proposals for that dimension, write 2–3 sentences that integrate their content and provide directly actionable guidance.
-- If there are no proposals for that dimension, write 1–2 sentences indicating that no major issues were flagged there.
+- Open with a 1-sentence summary of the overall assessment for that dimension.
+- Then list the specific issues or observations as bullet points (2-4 bullets).
+- If there are no proposals for that dimension, write 1-2 sentences indicating that no major issues were flagged there.
 
 Consider both the globally strongest proposals and the most unique proposals so that high-impact but novel insights are not overlooked.
 
@@ -450,7 +451,7 @@ Then write a markdown heading "## Proposed Revisions" followed by a numbered lis
 - Start with an action verb (e.g., "Add...", "Rewrite...", "Clarify...", "Run...")
 - Mark as [REQUIRED] (undermines core contribution/validity if not fixed) or [SUGGESTED] (strengthens but not essential)
 - If a revision involves multiple related changes, use lettered sub-items (a, b, c) rather than joining with "and"
-- Include a one-sentence justification after each main item
+- Include a one-sentence justification after each main item, formatted in italics: *Justification: ...*
 - Use an inquisitive tone where appropriate
 
 Do not restate the prioritized list verbatim inside the four sections; use the sections to add diagnostic detail, boundary conditions, and conflict resolution.

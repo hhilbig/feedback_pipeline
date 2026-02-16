@@ -63,6 +63,21 @@ def add_history_entry(paper_text: str, result: dict, model: str, num_agents: int
     return entry_id
 
 
+def _style_meta_review(md: str) -> str:
+    """Replace [REQUIRED] and [SUGGESTED] tags with colored HTML badges."""
+    md = md.replace(
+        "[REQUIRED]",
+        '<span style="background-color:#ff4b4b22;color:#ff4b4b;padding:2px 6px;'
+        'border-radius:4px;font-weight:600">[REQUIRED]</span>',
+    )
+    md = md.replace(
+        "[SUGGESTED]",
+        '<span style="background-color:#1f77b422;color:#1f77b4;padding:2px 6px;'
+        'border-radius:4px;font-weight:600">[SUGGESTED]</span>',
+    )
+    return md
+
+
 def copy_button_js(text: str, button_id: str = "copy_btn") -> None:
     """Render a JavaScript-based copy button that works in browsers."""
     # Escape for JS string literal
@@ -473,7 +488,15 @@ if display_result:
     st.success("Feedback generated!" if display_source == "Current run" else f"Viewing: {display_source}")
 
     st.header("3. Results")
-    st.markdown(display_result["meta_review"])
+    meta_review_md = display_result["meta_review"]
+    parts = meta_review_md.split("## Proposed Revisions", 1)
+    st.markdown(_style_meta_review(parts[0]), unsafe_allow_html=True)
+    if len(parts) > 1:
+        st.divider()
+        st.markdown(
+            _style_meta_review("## Proposed Revisions" + parts[1]),
+            unsafe_allow_html=True,
+        )
 
     # Export options
     meta_review_text = display_result["meta_review"]
