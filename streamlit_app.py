@@ -50,11 +50,12 @@ def add_history_entry(paper_text: str, result: dict, model: str, num_agents: int
     entry = {
         "id": entry_id,
         "timestamp": datetime.now().isoformat(),
+        "title": _extract_paper_title(paper_text),
         "paper_preview": paper_text[:100].replace("\n", " ").strip(),
         "model": model,
         "num_agents": num_agents,
         "meta_review": result["meta_review"],
-        "cost_estimate": result.get("cost_estimate"),
+        "actual_usage": result.get("actual_usage"),
     }
     history = load_history()
     history.append(entry)
@@ -90,6 +91,48 @@ def copy_button_js(text: str, button_id: str = "copy_btn") -> None:
     </script>
     """
     components.html(html, height=50)
+
+
+def _extract_paper_title(paper_text: str, max_len: int = 60) -> str:
+    """Extract a meaningful title from paper text, skipping LaTeX preamble."""
+    import re
+
+    skip_prefixes = (
+        "\\documentclass", "\\usepackage", "\\begin{document}",
+        "\\newcommand", "\\renewcommand", "\\setlength", "\\input",
+        "\\maketitle", "\\pagestyle", "\\bibliographystyle",
+    )
+
+    lines = paper_text.split("\n")
+    for line in lines:
+        stripped = line.strip()
+        # Skip blank lines and comments
+        if not stripped or stripped.startswith("%"):
+            continue
+        # Skip common preamble commands
+        if any(stripped.startswith(p) for p in skip_prefixes):
+            continue
+        # Extract content from \title{...}
+        title_match = re.match(r"\\title\{(.+)\}", stripped)
+        if title_match:
+            stripped = title_match.group(1)
+        # Strip wrapping commands like \textbf{...}, \section*{...}, \section{...}
+        stripped = re.sub(r"\\(?:textbf|textit|emph|section\*?|subsection\*?|chapter\*?)\{([^}]*)\}", r"\1", stripped)
+        # Remove remaining backslash commands (e.g. \centering, \large)
+        stripped = re.sub(r"\\[a-zA-Z]+\*?", "", stripped).strip()
+        # Skip if nothing meaningful remains
+        if not stripped or len(stripped) < 5:
+            continue
+        # Truncate
+        if len(stripped) > max_len:
+            stripped = stripped[:max_len - 3] + "..."
+        return stripped
+
+    # Fallback: first 60 chars of raw text
+    fallback = paper_text[:max_len].replace("\n", " ").strip()
+    if len(fallback) > max_len:
+        fallback = fallback[:max_len - 3] + "..."
+    return fallback
 
 
 st.set_page_config(
@@ -132,29 +175,38 @@ This pipeline mimics a rigorous academic review process using specialized AI age
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  1. GENERATION                                                      │
+│  1. GENERATION (with Diversity Seeds)                                │
 │     8 specialized agents review your paper in parallel:             │
-│     • 3 Theorists (contribution, logic, assumptions)                │
-│     • 2 Rivals (alternative explanations, rival hypotheses)         │
-│     • 2 Methodologists (empirical design, statistical issues)       │
+│     • 3 Theorists (assumptions / causal mechanisms / frameworks)    │
+│     • 2 Rivals (confounders / competing mechanisms)                 │
+│     • 2 Methodologists (identification / measurement)               │
 │     • 1 Editor (clarity, structure, organization)                   │
-│     Each agent proposes ONE high-impact feedback item.              │
+│     Each agent has a unique perspective seed for diverse feedback.  │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  2. SCORING (Dual-Pass)                                             │
+│  1b. GROUNDING CHECK                                                │
+│     Flags proposals that reference tables, figures, or sections     │
+│     not found in the paper (hallucination guardrail).               │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  2. SCORING (Dual-Pass + Confidence Weighting)                      │
 │     Each proposal is scored twice to remove positional bias:        │
 │     • Pass 1: Paper shown first, then proposal                      │
 │     • Pass 2: Proposal shown first, then paper                      │
 │     Scores averaged across: Importance, Specificity,                │
 │     Actionability, Uniqueness → Composite score                     │
+│     Composite adjusted ±10% based on judge agreement.               │
 └─────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  3. CRITIQUE & REVISION                                             │
 │     Top proposals (composite ≥ 3.0) enter a "Discussant" loop:      │
+│     • Semantic deduplication via embeddings (cosine similarity)     │
 │     • A Discussant Agent critiques each proposal                    │
 │     • Original agents revise based on critique                      │
 │     • Revised proposals are re-scored and merged with originals     │
@@ -162,8 +214,16 @@ This pipeline mimics a rigorous academic review process using specialized AI age
                                   │
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  4. SYNTHESIS                                                       │
-│     A Meta-Reviewer synthesizes the top-K proposals into:           │
+│  4. CLUSTER & SYNTHESIZE                                            │
+│     Related proposals are clustered by embedding similarity.        │
+│     Multi-proposal clusters are synthesized into consolidated       │
+│     findings, preserving the strongest elements from each.          │
+└─────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  5. SYNTHESIS                                                       │
+│     A Meta-Reviewer synthesizes clustered proposals into:           │
 │     • Prioritized list of key revisions                             │
 │     • Section-by-section guidance (contribution, logic,             │
 │       interpretation, writing)                                      │
@@ -176,10 +236,13 @@ This pipeline mimics a rigorous academic review process using specialized AI age
 ```
 
 **Why this approach?**
-- **Ensemble generation**: Multiple perspectives catch different issues
+- **Diverse ensemble**: Each agent gets a unique perspective seed, not just temperature-based stochasticity
+- **Hallucination guardrail**: Catches fabricated references before scoring
+- **Confidence-weighted scoring**: Judge agreement adjusts composite scores ±10%
+- **Semantic deduplication**: Embedding-based similarity catches paraphrased duplicates
+- **Cluster-then-synthesize**: Groups related feedback before meta-review for better synthesis
 - **Dual-pass scoring**: Removes AI's tendency to prefer text shown first
 - **Critique loop**: Refines proposals like human peer review
-- **Structured output**: Actionable guidance, not just criticism
 """)
 
 # --- Sidebar: Settings ---
@@ -220,9 +283,12 @@ with st.sidebar:
     else:
         # Show most recent 10 entries
         for entry in reversed(history[-10:]):
-            timestamp = entry["timestamp"][:10]
-            preview = entry["paper_preview"][:30] + "..." if len(entry["paper_preview"]) > 30 else entry["paper_preview"]
-            label = f"{timestamp}: {preview}"
+            title = entry.get("title") or entry.get("paper_preview", "")[:40]
+            if len(title) > 40:
+                title = title[:37] + "..."
+            model_info = entry.get("model", "")
+            date = entry["timestamp"][:10]
+            label = f"{title}\n{model_info} · {entry.get('num_agents', '?')} agents · {date}"
             if st.button(label, key=f"history_{entry['id']}", use_container_width=True):
                 st.session_state.selected_history_id = entry["id"]
                 st.session_state.current_result = None  # Clear current to show history
@@ -357,9 +423,10 @@ if st.session_state.selected_history_id:
         if entry["id"] == st.session_state.selected_history_id:
             display_result = {
                 "meta_review": entry["meta_review"],
-                "cost_estimate": entry.get("cost_estimate"),
+                "actual_usage": entry.get("actual_usage") or entry.get("cost_estimate"),
             }
-            display_source = f"History: {entry['timestamp'][:10]} ({entry['model']}, {entry['num_agents']} agents)"
+            hist_title = entry.get("title") or entry.get("paper_preview", "")[:40]
+            display_source = f"History: {hist_title} ({entry['model']}, {entry['num_agents']} agents, {entry['timestamp'][:10]})"
             break
 elif st.session_state.current_result:
     # Show current result
@@ -385,8 +452,9 @@ if display_result:
     with col2:
         copy_button_js(meta_review_text)
 
-    # Display cost estimate
-    cost = display_result.get("cost_estimate")
-    if cost:
-        with st.expander("Cost Estimate"):
-            st.text(_format_cost_estimate(cost))
+    # Display actual usage / cost
+    usage = display_result.get("actual_usage") or display_result.get("cost_estimate")
+    if usage:
+        label = "Actual Token Usage" if usage.get("source") == "actual" else "Cost Estimate"
+        with st.expander(label):
+            st.text(_format_cost_estimate(usage))
