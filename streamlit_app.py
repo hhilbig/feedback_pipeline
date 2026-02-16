@@ -283,7 +283,12 @@ with st.sidebar:
     else:
         # Show most recent 10 entries
         for entry in reversed(history[-10:]):
-            title = entry.get("title") or entry.get("paper_preview", "")[:40]
+            title = entry.get("title", "")
+            if not title or title.lstrip().startswith("\\"):
+                # Old entries without title or title is LaTeX preamble
+                title = _extract_paper_title(entry.get("paper_preview", ""))
+            if not title or title.lstrip().startswith("\\"):
+                title = "Paper feedback"
             if len(title) > 40:
                 title = title[:37] + "..."
             model_info = entry.get("model", "")
@@ -425,7 +430,11 @@ if st.session_state.selected_history_id:
                 "meta_review": entry["meta_review"],
                 "actual_usage": entry.get("actual_usage") or entry.get("cost_estimate"),
             }
-            hist_title = entry.get("title") or entry.get("paper_preview", "")[:40]
+            hist_title = entry.get("title", "")
+            if not hist_title or hist_title.lstrip().startswith("\\"):
+                hist_title = _extract_paper_title(entry.get("paper_preview", ""))
+            if not hist_title or hist_title.lstrip().startswith("\\"):
+                hist_title = "Paper feedback"
             display_source = f"History: {hist_title} ({entry['model']}, {entry['num_agents']} agents, {entry['timestamp'][:10]})"
             break
 elif st.session_state.current_result:
