@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -403,6 +404,10 @@ def _meta_messages(selection: Dict[str, Any], top_k: int) -> List[Dict[str, str]
             "uniqueness": p["uniqueness"],
             "composite": p["composite"],
             "reviewer_agreement": _calc_agreement(p),
+            **({"grounding_flag": True, "missing_refs": p["missing_refs"]}
+               if p.get("grounding_flag") else {}),
+            **({"cluster_size": p["cluster_size"], "source_ids": p["source_ids"]}
+               if p.get("cluster_size", 0) > 1 else {}),
         }
         for p in selection.get("high_quality", [])
     ]
@@ -431,6 +436,10 @@ Consider both the globally strongest proposals and the most unique proposals so 
 Each proposal includes a reviewer_agreement score (0-1) indicating consensus among scoring passes:
 - High agreement (>0.75): Confident assessment; prioritize these issues.
 - Low agreement (<0.5): Contested assessment; note uncertainty when including.
+
+Some proposals may have a grounding_flag=True with missing_refs listing references (tables, figures, sections) not found in the paper. Treat these with extra skepticism—the underlying insight may still be valid, but verify that the specific references are accurate before incorporating.
+
+Some proposals may have cluster_size > 1, indicating they were synthesized from multiple related proposals. These consolidated findings carry more weight as they represent convergent observations from multiple reviewers. The source_ids field lists the original proposals that were merged.
 
 Before writing the final list, perform an explicit prioritization step:
 - Review all high-quality proposals below.
@@ -482,6 +491,45 @@ Example format:
 client = AsyncOpenAI()  # Requires OPENAI_API_KEY in environment
 
 
+class UsageTracker:
+    """Accumulates actual token usage from OpenAI API responses."""
+
+    def __init__(self):
+        self.stages: Dict[str, Dict[str, int]] = {}
+        self._current_stage = "unknown"
+
+    def set_stage(self, stage: str):
+        self._current_stage = stage
+        if stage not in self.stages:
+            self.stages[stage] = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0}
+
+    def record(self, usage):
+        """Record usage from an OpenAI API response's usage object."""
+        if usage is None:
+            return
+        stage = self.stages.setdefault(
+            self._current_stage,
+            {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0},
+        )
+        stage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        stage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        stage["requests"] += 1
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details:
+            stage["cached_tokens"] += getattr(details, "cached_tokens", 0) or 0
+
+    def record_embedding(self, usage):
+        """Record usage from an embedding API response."""
+        if usage is None:
+            return
+        stage = self.stages.setdefault(
+            "embeddings",
+            {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0},
+        )
+        stage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        stage["requests"] += 1
+
+
 # Thresholds for meta-review inclusion (tune as needed)
 IMPORTANCE_THRESHOLD = 3
 COMPOSITE_THRESHOLD = 3.0
@@ -524,15 +572,37 @@ PERSONA_EDITOR = (
     "'writing_structure' dimension and resist the temptation to critique statistical methods or theoretical framing."
 )
 
+# Perspective seeds: each same-role agent gets a different analytical focus
+# to increase diversity of feedback (research shows structured prompt variation
+# outperforms temperature-based stochasticity for ensemble diversity).
+PERSPECTIVE_SEEDS = {
+    "theorist": [
+        "Focus especially on unstated assumptions and scope conditions.",
+        "Focus especially on the causal mechanism and whether it is fully specified.",
+        "Focus especially on the paper's positioning relative to competing theoretical frameworks.",
+    ],
+    "rival": [
+        "Focus especially on omitted variables, confounders, or selection effects that could generate the same findings.",
+        "Focus especially on whether the results could be explained by a simpler or competing mechanism.",
+    ],
+    "methodologist": [
+        "Focus especially on the identification strategy and whether the key assumptions are testable or credible.",
+        "Focus especially on measurement validity, sample construction, and data limitations.",
+    ],
+    "editor": [
+        "Focus on clarity, organization, and whether the paper's structure supports its argument.",
+    ],
+}
+
 BASE_PERSONA_DECK = [
-    PERSONA_THEORIST,
-    PERSONA_THEORIST,
-    PERSONA_THEORIST,  # 3 Theorists
-    PERSONA_RIVAL,
-    PERSONA_RIVAL,  # 2 Rivals
-    PERSONA_METHODOLOGIST,
-    PERSONA_METHODOLOGIST,  # 2 Methodologists
-    PERSONA_EDITOR,  # 1 Editor
+    (PERSONA_THEORIST, "theorist", 0),
+    (PERSONA_THEORIST, "theorist", 1),
+    (PERSONA_THEORIST, "theorist", 2),  # 3 Theorists
+    (PERSONA_RIVAL, "rival", 0),
+    (PERSONA_RIVAL, "rival", 1),  # 2 Rivals
+    (PERSONA_METHODOLOGIST, "methodologist", 0),
+    (PERSONA_METHODOLOGIST, "methodologist", 1),  # 2 Methodologists
+    (PERSONA_EDITOR, "editor", 0),  # 1 Editor
 ]
 
 
@@ -547,10 +617,13 @@ def create_worker_assignments(num_agents: int) -> List[Dict[str, Any]]:
     num_blocks = num_agents // 8
     full_deck = BASE_PERSONA_DECK * num_blocks
 
-    # 3. Assignment Construction
+    # 3. Assignment Construction with perspective seeds
     assignments = []
-    for i, persona in enumerate(full_deck):
-        assignments.append({"id": i + 1, "persona": persona})
+    for i, (persona, role, seed_idx) in enumerate(full_deck):
+        seeds = PERSPECTIVE_SEEDS[role]
+        seed = seeds[seed_idx % len(seeds)]
+        persona_with_seed = persona + f"\n\nPerspective focus: {seed}"
+        assignments.append({"id": i + 1, "persona": persona_with_seed})
     return assignments
 
 
@@ -562,6 +635,7 @@ def create_worker_assignments(num_agents: int) -> List[Dict[str, Any]]:
 async def chat_json(
     messages: List[Dict[str, str]],
     model: str = GENERATION_MODEL,
+    tracker: "UsageTracker | None" = None,
 ) -> Any:
     """Call the chat API and parse a JSON object response."""
     resp = await client.chat.completions.create(
@@ -569,6 +643,8 @@ async def chat_json(
         messages=messages,
         response_format={"type": "json_object"},
     )
+    if tracker:
+        tracker.record(resp.usage)
     content = resp.choices[0].message.content
     return json.loads(content)
 
@@ -578,12 +654,13 @@ async def chat_json_with_retry(
     model: str = GENERATION_MODEL,
     max_retries: int = 3,
     base_delay: float = 1.0,
+    tracker: "UsageTracker | None" = None,
 ) -> Any:
     """chat_json with exponential backoff retry for transient errors."""
     last_error = None
     for attempt in range(max_retries):
         try:
-            return await chat_json(messages, model)
+            return await chat_json(messages, model, tracker=tracker)
         except (RateLimitError, APIConnectionError, APITimeoutError) as e:
             last_error = e
             if attempt < max_retries - 1:
@@ -613,6 +690,7 @@ async def generate_all_proposals(
     paper_text: str,
     workers: List[Dict[str, Any]],  # CHANGED: Now accepts specific worker list
     model: str,  # CHANGED: Now accepts specific model
+    tracker: "UsageTracker | None" = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Generate proposals with partial failure recovery.
 
@@ -626,7 +704,7 @@ async def generate_all_proposals(
             assignment["persona"], paper_text, assignment["id"]
         )
         # Use retry wrapper for transient errors
-        task = chat_json_with_retry(messages, model=model)
+        task = chat_json_with_retry(messages, model=model, tracker=tracker)
         tasks.append(task)
 
     # Gather with return_exceptions=True for partial recovery
@@ -647,6 +725,76 @@ async def generate_all_proposals(
 
 
 # -------------------------------------------------------------------
+# 1b. Grounding check (hallucination guardrail)
+# -------------------------------------------------------------------
+
+
+def check_grounding(proposal_text: str, paper_text: str) -> Dict[str, Any]:
+    """Check if a proposal references entities (tables, figures, sections,
+    variable-like names) that actually appear in the paper text.
+
+    Returns:
+        {"grounded": bool, "missing_refs": [...]}
+    """
+    paper_lower = paper_text.lower()
+
+    # Extract specific references from proposal
+    # Table N, Figure N, Section N (case-insensitive, with optional period/colon)
+    ref_patterns = [
+        (r"\b(table\s+\d+[a-z]?)", "table"),
+        (r"\b(figure\s+\d+[a-z]?)", "figure"),
+        (r"\b(fig\.\s*\d+[a-z]?)", "figure"),
+        (r"\b(section\s+\d+(?:\.\d+)?)", "section"),
+        (r"\b(appendix\s+[a-z0-9])", "appendix"),
+        (r"\b(column\s+\d+)", "column"),
+        (r"\b(panel\s+[a-z])\b", "panel"),
+        (r"\b(equation\s+\d+)", "equation"),
+    ]
+
+    # Normalize whitespace in paper for comparison
+    paper_normalized = re.sub(r"\s+", " ", paper_lower)
+
+    missing_refs = []
+    for pattern, ref_type in ref_patterns:
+        matches = re.findall(pattern, proposal_text, re.IGNORECASE)
+        for match in matches:
+            # Normalize whitespace for comparison
+            normalized = re.sub(r"\s+", " ", match.lower().strip())
+            if normalized not in paper_normalized:
+                missing_refs.append({"ref": match.strip(), "type": ref_type})
+
+    # Deduplicate missing refs
+    seen = set()
+    unique_missing = []
+    for ref in missing_refs:
+        key = ref["ref"].lower()
+        if key not in seen:
+            seen.add(key)
+            unique_missing.append(ref)
+
+    return {
+        "grounded": len(unique_missing) == 0,
+        "missing_refs": unique_missing,
+    }
+
+
+def check_all_groundings(
+    proposals: List[Dict[str, Any]],
+    paper_text: str,
+) -> List[Dict[str, Any]]:
+    """Run grounding check on all proposals and annotate them.
+
+    Adds 'grounding_flag' (bool) and 'missing_refs' (list) to each proposal.
+    Does NOT remove any proposals.
+    """
+    for p in proposals:
+        result = check_grounding(p.get("text", ""), paper_text)
+        p["grounding_flag"] = not result["grounded"]
+        p["missing_refs"] = result["missing_refs"]
+    return proposals
+
+
+# -------------------------------------------------------------------
 # 2. Independent scoring workers
 # -------------------------------------------------------------------
 
@@ -654,6 +802,7 @@ async def generate_all_proposals(
 async def score_single_proposal_two_pass(
     paper_text: str,
     proposal: Dict[str, Any],
+    tracker: "UsageTracker | None" = None,
 ) -> Dict[str, Any]:
     # Pass 1: canonical order
     p1 = await chat_json_with_retry(
@@ -676,6 +825,7 @@ async def score_single_proposal_two_pass(
             },
         ],
         model=SCORING_MODEL,
+        tracker=tracker,
     )
 
     # Pass 2: reversed rubric order + swapped context
@@ -699,6 +849,7 @@ async def score_single_proposal_two_pass(
             },
         ],
         model=SCORING_MODEL,
+        tracker=tracker,
     )
 
     def get(v):
@@ -721,8 +872,9 @@ async def score_single_proposal_two_pass(
 async def score_all_proposals(
     paper_text: str,
     proposals: List[Dict[str, Any]],
+    tracker: "UsageTracker | None" = None,
 ) -> List[Dict[str, Any]]:
-    tasks = [score_single_proposal_two_pass(paper_text, p) for p in proposals]
+    tasks = [score_single_proposal_two_pass(paper_text, p, tracker=tracker) for p in proposals]
     scored = await asyncio.gather(*tasks)
 
     # Compute composite deterministically in Python
@@ -732,8 +884,20 @@ async def score_all_proposals(
         S = s["specificity"]
         A = s["actionability"]
         U = s["uniqueness"]
-        composite = 0.35 * I + 0.25 * S + 0.20 * A + 0.20 * U
-        s["composite"] = composite
+        base_composite = 0.35 * I + 0.25 * S + 0.20 * A + 0.20 * U
+
+        # Confidence-weighted adjustment: ±10% based on judge agreement
+        # High agreement -> slight boost, high disagreement -> slight penalty
+        disagree = s.get("judge_disagreement", {})
+        if disagree:
+            avg_disagreement = sum(disagree.values()) / len(disagree)
+            agreement = 1 - (avg_disagreement / 4)  # 0-1 scale
+            adjustment = 0.9 + 0.2 * agreement  # range: 0.9 to 1.1
+        else:
+            adjustment = 1.0
+
+        s["composite_raw"] = round(base_composite, 4)
+        s["composite"] = round(base_composite * adjustment, 4)
 
     return scored
 
@@ -747,9 +911,10 @@ async def score_all_proposals(
 async def critique_single_proposal(
     paper_text: str,
     proposal: Dict[str, Any],
+    tracker: "UsageTracker | None" = None,
 ) -> Dict[str, Any]:
     messages = _critic_messages(paper_text, proposal)
-    critique = await chat_json_with_retry(messages, model=GENERATION_MODEL)
+    critique = await chat_json_with_retry(messages, model=GENERATION_MODEL, tracker=tracker)
     critique["original_id"] = proposal.get("id")
     return critique
 
@@ -757,10 +922,11 @@ async def critique_single_proposal(
 async def run_critique_round(
     paper_text: str,
     proposals_to_critique: List[Dict[str, Any]],
+    tracker: "UsageTracker | None" = None,
 ) -> List[Dict[str, Any]]:
     if not proposals_to_critique:
         return []
-    tasks = [critique_single_proposal(paper_text, p) for p in proposals_to_critique]
+    tasks = [critique_single_proposal(paper_text, p, tracker=tracker) for p in proposals_to_critique]
     critiques = await asyncio.gather(*tasks)
     return critiques
 
@@ -837,9 +1003,10 @@ async def revise_single_proposal(
     proposal: Dict[str, Any],
     critique_text: str,
     model: str = GENERATION_MODEL,
+    tracker: "UsageTracker | None" = None,
 ) -> Dict[str, Any]:
     messages = _revision_messages(paper_text, proposal, critique_text)
-    revised = await chat_json_with_retry(messages, model=model)
+    revised = await chat_json_with_retry(messages, model=model, tracker=tracker)
     revised["id"] = proposal["id"]
     revised["persona"] = proposal.get("persona")
     revised["original_text"] = proposal.get("text", "")
@@ -852,20 +1019,56 @@ async def run_revision_round(
     critiques: List[Dict[str, Any]],
     revise_k: int,
     model: str = GENERATION_MODEL,
+    tracker: "UsageTracker | None" = None,
 ) -> List[Dict[str, Any]]:
     critique_by_id = {
         c.get("original_id"): c.get("critique_text", "") for c in critiques
     }
     to_revise = [p for p in proposals if p.get("id") in critique_by_id][:revise_k]
     tasks = [
-        revise_single_proposal(paper_text, p, critique_by_id[p["id"]], model=model)
+        revise_single_proposal(paper_text, p, critique_by_id[p["id"]], model=model, tracker=tracker)
         for p in to_revise
     ]
     return await asyncio.gather(*tasks) if tasks else []
 
 
-def _proposal_similarity(p1: Dict[str, Any], p2: Dict[str, Any]) -> float:
-    """Jaccard similarity on problem text words."""
+EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def _cosine_similarity(v1: List[float], v2: List[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(a * b for a, b in zip(v1, v2))
+    norm1 = sum(a * a for a in v1) ** 0.5
+    norm2 = sum(a * a for a in v2) ** 0.5
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+    return dot / (norm1 * norm2)
+
+
+async def embed_texts(
+    texts: List[str],
+    tracker: "UsageTracker | None" = None,
+) -> List[List[float]]:
+    """Embed a list of texts using OpenAI's embeddings API.
+
+    Uses text-embedding-3-small (cheap, fast, good for similarity).
+    Cost: ~$0.001 per run for 8-32 short texts.
+    """
+    if not texts:
+        return []
+    resp = await client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=texts,
+    )
+    if tracker:
+        tracker.record_embedding(resp.usage)
+    # Sort by index to preserve input ordering
+    sorted_data = sorted(resp.data, key=lambda x: x.index)
+    return [item.embedding for item in sorted_data]
+
+
+def _proposal_similarity_jaccard(p1: Dict[str, Any], p2: Dict[str, Any]) -> float:
+    """Jaccard similarity on problem text words (fallback)."""
     text1 = p1.get("text", "") or p1.get("problem", "")
     text2 = p2.get("text", "") or p2.get("problem", "")
     words1 = set(text1.lower().split())
@@ -875,40 +1078,64 @@ def _proposal_similarity(p1: Dict[str, Any], p2: Dict[str, Any]) -> float:
     return len(words1 & words2) / len(words1 | words2)
 
 
-def deduplicate_proposals(
+async def deduplicate_proposals(
     proposals: List[Dict[str, Any]],
-    similarity_threshold: float = 0.5,
+    similarity_threshold: float = 0.82,
+    tracker: "UsageTracker | None" = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
-    """Remove near-duplicate proposals, keeping highest composite score.
+    """Remove near-duplicate proposals using embedding cosine similarity.
+
+    Cross-dimension deduplication: a methodologist and theorist may identify
+    the same underlying issue in different words.
+
+    Caches embeddings on proposals for reuse in clustering.
 
     Returns:
         Tuple of (deduplicated_proposals, num_removed).
     """
-    # Group by dimension first
-    by_dim = defaultdict(list)
-    for p in proposals:
-        by_dim[p.get("dimension", "unknown")].append(p)
+    if not proposals:
+        return [], 0
 
-    deduplicated = []
-    for dim, dim_proposals in by_dim.items():
-        # Sort by composite descending to keep best
-        sorted_props = sorted(dim_proposals, key=lambda x: x.get("composite", 0), reverse=True)
-        kept = []
-        for p in sorted_props:
-            # Check if too similar to any kept proposal
+    # Extract texts and compute embeddings
+    texts = [p.get("text", "") or p.get("problem", "") for p in proposals]
+
+    try:
+        embeddings = await embed_texts(texts, tracker=tracker)
+        # Cache embeddings on proposals for reuse in clustering
+        for p, emb in zip(proposals, embeddings):
+            p["_embedding"] = emb
+        use_embeddings = True
+    except Exception as e:
+        _progress(f"  Embedding API failed ({e}), falling back to Jaccard similarity")
+        use_embeddings = False
+
+    # Sort by composite descending to keep best
+    sorted_props = sorted(proposals, key=lambda x: x.get("composite", 0), reverse=True)
+
+    kept = []
+    for p in sorted_props:
+        if use_embeddings:
             is_duplicate = any(
-                _proposal_similarity(p, k) > similarity_threshold
+                _cosine_similarity(p["_embedding"], k["_embedding"]) > similarity_threshold
                 for k in kept
             )
-            if not is_duplicate:
-                kept.append(p)
-        deduplicated.extend(kept)
+        else:
+            is_duplicate = any(
+                _proposal_similarity_jaccard(p, k) > 0.5
+                for k in kept
+            )
+        if not is_duplicate:
+            kept.append(p)
 
-    num_removed = len(proposals) - len(deduplicated)
-    return deduplicated, num_removed
+    num_removed = len(proposals) - len(kept)
+    return kept, num_removed
 
 
-def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, Any]:
+async def select_and_classify(
+    scored: List[Dict[str, Any]],
+    top_k: int,
+    tracker: "UsageTracker | None" = None,
+) -> Dict[str, Any]:
     # Sort by composite, descending
     sorted_by_composite = sorted(scored, key=lambda x: x["composite"], reverse=True)
 
@@ -931,7 +1158,7 @@ def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, A
     ]
 
     # Deduplicate to remove near-identical proposals (keeps highest composite)
-    high_quality, num_deduplicated = deduplicate_proposals(high_quality)
+    high_quality, num_deduplicated = await deduplicate_proposals(high_quality, tracker=tracker)
 
     # Also rank high-quality proposals by uniqueness to surface novel ideas
     sorted_by_uniqueness = sorted(
@@ -960,11 +1187,169 @@ def select_and_classify(scored: List[Dict[str, Any]], top_k: int) -> Dict[str, A
 
 
 # -------------------------------------------------------------------
+# 3b. Cluster-then-synthesize pre-aggregation
+# -------------------------------------------------------------------
+
+
+CLUSTER_SYNTHESIS_SYSTEM_PROMPT = (
+    "You synthesize multiple related feedback proposals into a single consolidated finding. "
+    "Preserve the strongest elements from each proposal. Be concise."
+)
+
+
+def _cluster_synthesis_user_prompt(
+    cluster_proposals: List[Dict[str, Any]],
+) -> str:
+    proposals_json = json.dumps(
+        [{"id": p["id"], "dimension": p.get("dimension"), "text": p.get("text", "")}
+         for p in cluster_proposals],
+        ensure_ascii=False,
+        indent=2,
+    )
+    return f"""
+You receive {len(cluster_proposals)} related feedback proposals that address similar aspects of a paper.
+
+Synthesize them into a single consolidated finding that integrates the strongest elements from each.
+
+Requirements:
+- Length: ~70–130 words.
+- Structure: One-sentence headline starting with "Problem:", then 2-3 sentences of rationale, then 2-4 bullet-point diagnostic next steps.
+- Preserve any specific references (tables, sections, variables) that are well-grounded.
+- If proposals disagree, note the tension rather than silently choosing one side.
+
+Return a JSON object:
+- "dimension": the most appropriate dimension for this consolidated finding
+- "text": the synthesized feedback text
+- "source_ids": list of original proposal IDs that were merged
+
+Proposals to synthesize:
+```json
+{proposals_json}
+```""".strip()
+
+
+async def cluster_proposals(
+    proposals: List[Dict[str, Any]],
+    similarity_threshold: float = 0.65,
+    model: str = GENERATION_MODEL,
+    tracker: "UsageTracker | None" = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Cluster semantically related proposals and synthesize multi-proposal clusters.
+
+    Uses embeddings cached on proposals from the deduplication step.
+    Singletons pass through unchanged. Multi-proposal clusters get one LLM call
+    each to produce a consolidated finding.
+
+    Args:
+        proposals: List of proposals with cached _embedding fields.
+        similarity_threshold: Cosine similarity threshold for clustering.
+        model: Model for synthesis calls.
+        tracker: Optional UsageTracker for recording API usage.
+
+    Returns:
+        Tuple of (clustered_proposals, num_clusters_synthesized).
+    """
+    if not proposals or len(proposals) <= 1:
+        return proposals, 0
+
+    # Check if embeddings are available
+    has_embeddings = all(p.get("_embedding") for p in proposals)
+    if not has_embeddings:
+        # Try to compute embeddings if not cached
+        texts = [p.get("text", "") for p in proposals]
+        try:
+            embeddings = await embed_texts(texts, tracker=tracker)
+            for p, emb in zip(proposals, embeddings):
+                p["_embedding"] = emb
+        except Exception:
+            _progress("  Embeddings unavailable for clustering, skipping pre-aggregation")
+            return proposals, 0
+
+    # Simple agglomerative clustering via greedy merge
+    n = len(proposals)
+    cluster_ids = list(range(n))  # Each proposal starts in its own cluster
+
+    # Compute pairwise similarities and merge similar proposals
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = _cosine_similarity(proposals[i]["_embedding"], proposals[j]["_embedding"])
+            if sim >= similarity_threshold:
+                # Merge: assign j's cluster to i's cluster
+                old_cluster = cluster_ids[j]
+                new_cluster = cluster_ids[i]
+                for k in range(n):
+                    if cluster_ids[k] == old_cluster:
+                        cluster_ids[k] = new_cluster
+
+    # Group proposals by cluster
+    clusters: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+    for idx, cid in enumerate(cluster_ids):
+        clusters[cid].append(proposals[idx])
+
+    # Process clusters
+    result_proposals = []
+    synthesis_tasks = []
+    singleton_proposals = []
+    multi_clusters = []
+
+    for cid, cluster_props in clusters.items():
+        if len(cluster_props) == 1:
+            singleton_proposals.append(cluster_props[0])
+        else:
+            multi_clusters.append(cluster_props)
+
+    # Synthesize multi-proposal clusters in parallel
+    num_synthesized = len(multi_clusters)
+    if multi_clusters:
+        async def synthesize_cluster(cluster_props: List[Dict[str, Any]]) -> Dict[str, Any]:
+            messages = [
+                {"role": "system", "content": CLUSTER_SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content": _cluster_synthesis_user_prompt(cluster_props)},
+            ]
+            synthesized = await chat_json_with_retry(messages, model=model, tracker=tracker)
+            # Carry forward metadata from the highest-scoring proposal in cluster
+            best = max(cluster_props, key=lambda p: p.get("composite", 0))
+            synthesized["id"] = best["id"]
+            synthesized["persona"] = best.get("persona")
+            synthesized["composite"] = best.get("composite", 0)
+            synthesized["composite_raw"] = best.get("composite_raw", 0)
+            synthesized["importance"] = best.get("importance", 0)
+            synthesized["specificity"] = best.get("specificity", 0)
+            synthesized["actionability"] = best.get("actionability", 0)
+            synthesized["uniqueness"] = best.get("uniqueness", 0)
+            synthesized["judge_disagreement"] = best.get("judge_disagreement", {})
+            synthesized["cluster_size"] = len(cluster_props)
+            synthesized["source_ids"] = [p["id"] for p in cluster_props]
+            # Propagate grounding flags
+            if any(p.get("grounding_flag") for p in cluster_props):
+                synthesized["grounding_flag"] = True
+                all_missing = []
+                for p in cluster_props:
+                    all_missing.extend(p.get("missing_refs", []))
+                synthesized["missing_refs"] = all_missing
+            if best.get("_embedding"):
+                synthesized["_embedding"] = best["_embedding"]
+            return synthesized
+
+        synthesis_results = await asyncio.gather(
+            *[synthesize_cluster(cp) for cp in multi_clusters]
+        )
+        result_proposals.extend(synthesis_results)
+
+    result_proposals.extend(singleton_proposals)
+    return result_proposals, num_synthesized
+
+
+# -------------------------------------------------------------------
 # 4. Meta-review using all high-quality proposals
 # -------------------------------------------------------------------
 
 
-async def meta_review(selection: Dict[str, Any], top_k: int) -> str:
+async def meta_review(
+    selection: Dict[str, Any],
+    top_k: int,
+    tracker: "UsageTracker | None" = None,
+) -> str:
     messages = _meta_messages(selection, top_k)
     last_error = None
     for attempt in range(3):
@@ -973,6 +1358,8 @@ async def meta_review(selection: Dict[str, Any], top_k: int) -> str:
                 model=META_MODEL,
                 messages=messages,
             )
+            if tracker:
+                tracker.record(resp.usage)
             return resp.choices[0].message.content
         except (RateLimitError, APIConnectionError, APITimeoutError) as e:
             last_error = e
@@ -1029,6 +1416,22 @@ def estimate_cost_before_run(
     rescore_prompt_tokens = 2 * top_k * single_score_prompt
     rescore_completion_tokens = 2 * top_k * 50
 
+    # Estimate clustering (assume ~2 multi-proposal clusters for typical run)
+    estimated_clusters = max(1, num_agents // 8)
+    cluster_prompt_tokens = estimated_clusters * 200
+    cluster_completion_tokens = estimated_clusters * 150
+
+    # Estimate embedding cost (text-embedding-3-small: $0.02/1M tokens)
+    # Embeddings are called twice: once for dedup, once for clustering (if not cached)
+    embed_tokens = sum(
+        _count_text_tokens(
+            "Problem: Sample proposal text for estimation." * 2,
+            gen_model,
+        )
+        for _ in range(num_agents)
+    )
+    embed_cost = embed_tokens * 0.02 / 1e6  # text-embedding-3-small pricing
+
     # Estimate meta-review (1 call with all proposals)
     meta_prompt_tokens = _count_text_tokens(paper_text, META_MODEL) + num_agents * 200 + 500
     meta_completion_tokens = 800  # Typical meta-review length
@@ -1043,9 +1446,10 @@ def estimate_cost_before_run(
     critique_cost = critique_prompt_tokens * gen_pricing["input"] + critique_completion_tokens * gen_pricing["output"]
     revision_cost = revision_prompt_tokens * gen_pricing["input"] + revision_completion_tokens * gen_pricing["output"]
     rescore_cost = rescore_prompt_tokens * score_pricing["input"] + rescore_completion_tokens * score_pricing["output"]
+    cluster_cost = cluster_prompt_tokens * gen_pricing["input"] + cluster_completion_tokens * gen_pricing["output"]
     meta_cost = meta_prompt_tokens * meta_pricing["input"] + meta_completion_tokens * meta_pricing["output"]
 
-    total_cost = gen_cost + score_cost + critique_cost + revision_cost + rescore_cost + meta_cost
+    total_cost = gen_cost + score_cost + critique_cost + revision_cost + rescore_cost + cluster_cost + embed_cost + meta_cost
 
     return {
         "estimated_total_cost_usd": total_cost,
@@ -1055,312 +1459,76 @@ def estimate_cost_before_run(
             "critique": {"cost_usd": critique_cost, "prompt_tokens": critique_prompt_tokens, "completion_tokens": critique_completion_tokens},
             "revision": {"cost_usd": revision_cost, "prompt_tokens": revision_prompt_tokens, "completion_tokens": revision_completion_tokens},
             "re_scoring": {"cost_usd": rescore_cost, "prompt_tokens": rescore_prompt_tokens, "completion_tokens": rescore_completion_tokens},
+            "clustering": {"cost_usd": cluster_cost + embed_cost, "prompt_tokens": cluster_prompt_tokens, "completion_tokens": cluster_completion_tokens},
             "meta_review": {"cost_usd": meta_cost, "prompt_tokens": meta_prompt_tokens, "completion_tokens": meta_completion_tokens},
         },
         "note": "This is an estimate. Actual cost may vary based on proposal quality and lengths."
     }
 
 
-def _stage_cost_summary(
-    prompt_tokens: int,
-    completion_tokens: int,
-    model: str,
-) -> Dict[str, Any]:
-    pricing = _lookup_pricing_model(model)
-    cost = prompt_tokens * pricing["input"] + completion_tokens * pricing["output"]
-    total_tokens = prompt_tokens + completion_tokens
-    return {
-        "model": model,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "cost_usd": cost,
+def compute_actual_cost(tracker: UsageTracker, gen_model: str) -> Dict[str, Any]:
+    """Compute actual cost from tracked API usage data."""
+    stage_models = {
+        "generation": gen_model,
+        "scoring": SCORING_MODEL,
+        "critique": gen_model,
+        "revision": gen_model,
+        "re_scoring": SCORING_MODEL,
+        "clustering": gen_model,
+        "meta_review": META_MODEL,
     }
 
+    stages = {}
+    for stage_name, usage in tracker.stages.items():
+        if stage_name == "embeddings":
+            # Embedding pricing: $0.02 per 1M tokens for text-embedding-3-small
+            cost = usage["prompt_tokens"] * 0.02 / 1e6
+            stages[stage_name] = {
+                "model": EMBEDDING_MODEL,
+                "prompt_tokens": usage["prompt_tokens"],
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "requests": usage["requests"],
+                "cost_usd": cost,
+            }
+            continue
 
-def _estimate_generation_tokens(
-    paper_text: str,
-    proposals: List[Dict[str, Any]],
-) -> Tuple[int, int]:
-    prompt_tokens = 0
-    completion_tokens = 0
-    for proposal in proposals:
-        worker_id = proposal.get("id", 0)
-        persona_prompt = proposal.get("persona", GENERATION_SYSTEM_PROMPT)
-        messages = _generation_messages(persona_prompt, paper_text, worker_id)
-        prompt_tokens += _count_message_tokens(messages, GENERATION_MODEL)
-        completion_tokens += _count_text_tokens(
-            json.dumps(
-                {
-                    "id": proposal.get("id"),
-                    "dimension": proposal.get("dimension"),
-                    "text": proposal.get("text"),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            GENERATION_MODEL,
-        )
-    return prompt_tokens, completion_tokens
+        model = stage_models.get(stage_name, gen_model)
+        pricing = _lookup_pricing_model(model)
 
+        cached = usage.get("cached_tokens", 0)
+        non_cached_input = usage["prompt_tokens"] - cached
 
-def _estimate_scoring_tokens(
-    paper_text: str,
-    scored: List[Dict[str, Any]],
-) -> Tuple[int, int]:
-    prompt_tokens = 0
-    completion_tokens = 0
-    for proposal in scored:
-        messages = _scoring_messages(
-            paper_text,
-            proposal.get("text", ""),
-            proposal.get("dimension", ""),
-        )
-        prompt_tokens += _count_message_tokens(messages, SCORING_MODEL)
-        completion_tokens += _count_text_tokens(
-            json.dumps(
-                {
-                    "importance": proposal.get("importance"),
-                    "specificity": proposal.get("specificity"),
-                    "actionability": proposal.get("actionability"),
-                    "uniqueness": proposal.get("uniqueness"),
-                },
-                separators=(",", ":"),
-            ),
-            SCORING_MODEL,
-        )
-    return prompt_tokens, completion_tokens
-
-
-def _estimate_critique_tokens(
-    paper_text: str,
-    high_quality: List[Dict[str, Any]],
-    critiques: List[Dict[str, Any]],
-) -> Tuple[int, int]:
-    if not high_quality:
-        return 0, 0
-    prompt_tokens = 0
-    completion_tokens = 0
-    critique_by_id = {c.get("original_id"): c for c in critiques}
-    for proposal in high_quality:
-        messages = _critic_messages(paper_text, proposal)
-        prompt_tokens += _count_message_tokens(messages, GENERATION_MODEL)
-        critique = critique_by_id.get(proposal.get("id"))
-        if critique:
-            completion_tokens += _count_text_tokens(
-                json.dumps(
-                    {
-                        "original_id": critique.get("original_id"),
-                        "critique_text": critique.get("critique_text"),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                GENERATION_MODEL,
-            )
-    return prompt_tokens, completion_tokens
-
-
-def _estimate_revision_tokens(
-    paper_text: str,
-    proposals_to_revise: List[Dict[str, Any]],
-    critiques: List[Dict[str, Any]],
-) -> Tuple[int, int]:
-    if not proposals_to_revise:
-        return 0, 0
-    prompt_tokens = 0
-    completion_tokens = 0
-    critique_by_id = {
-        c.get("original_id"): c.get("critique_text", "") for c in critiques
-    }
-    for proposal in proposals_to_revise:
-        critique_text = critique_by_id.get(proposal.get("id"), "")
-        if critique_text:
-            messages = _revision_messages(paper_text, proposal, critique_text)
-            prompt_tokens += _count_message_tokens(messages, GENERATION_MODEL)
-            # Estimate completion: revised proposal JSON (id, dimension, text)
-            completion_tokens += _count_text_tokens(
-                json.dumps(
-                    {
-                        "id": proposal.get("id"),
-                        "dimension": proposal.get("dimension", ""),
-                        "text": proposal.get("text", ""),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-                GENERATION_MODEL,
-            )
-    return prompt_tokens, completion_tokens
-
-
-def _estimate_rescoring_tokens(
-    paper_text: str,
-    revised_proposals: List[Dict[str, Any]],
-) -> Tuple[int, int]:
-    if not revised_proposals:
-        return 0, 0
-    prompt_tokens = 0
-    completion_tokens = 0
-    # Two-pass scoring: each proposal gets scored twice
-    for proposal in revised_proposals:
-        # Pass 1: canonical order
-        messages1 = [
-            {"role": "system", "content": SCORING_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": _scoring_user_prompt_ordered(
-                    paper_text,
-                    proposal.get("text", ""),
-                    proposal.get("dimension", ""),
-                    rubric_order=[
-                        "importance",
-                        "specificity",
-                        "actionability",
-                        "uniqueness",
-                    ],
-                    context_order="paper_then_proposal",
-                ),
-            },
-        ]
-        prompt_tokens += _count_message_tokens(messages1, SCORING_MODEL)
-        # Pass 2: reversed order
-        messages2 = [
-            {"role": "system", "content": SCORING_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": _scoring_user_prompt_ordered(
-                    paper_text,
-                    proposal.get("text", ""),
-                    proposal.get("dimension", ""),
-                    rubric_order=[
-                        "uniqueness",
-                        "actionability",
-                        "specificity",
-                        "importance",
-                    ],
-                    context_order="proposal_then_paper",
-                ),
-            },
-        ]
-        prompt_tokens += _count_message_tokens(messages2, SCORING_MODEL)
-        # Completion: two JSON responses with scores
-        score_json = json.dumps(
-            {
-                "importance": proposal.get("importance", 0),
-                "specificity": proposal.get("specificity", 0),
-                "actionability": proposal.get("actionability", 0),
-                "uniqueness": proposal.get("uniqueness", 0),
-            },
-            separators=(",", ":"),
-        )
-        completion_tokens += 2 * _count_text_tokens(score_json, SCORING_MODEL)
-    return prompt_tokens, completion_tokens
-
-
-def _estimate_meta_tokens(
-    selection: Dict[str, Any],
-    meta_review_text: str,
-    top_k: int,
-) -> Tuple[int, int]:
-    if not selection:
-        return 0, _count_text_tokens(meta_review_text, META_MODEL)
-    messages = _meta_messages(selection, top_k)
-    prompt_tokens = _count_message_tokens(messages, META_MODEL)
-    completion_tokens = _count_text_tokens(meta_review_text, META_MODEL)
-    return prompt_tokens, completion_tokens
-
-
-def estimate_pipeline_cost(
-    paper_text: str,
-    pipeline_output: Dict[str, Any],
-    gen_model: str,  # New Argument
-    top_k: int = 5,  # For cost estimation
-) -> Dict[str, Any]:
-    proposals = pipeline_output.get("proposals", [])
-    scored = pipeline_output.get("scored", [])
-    selection = pipeline_output.get("selection", {})
-    meta_review_text = pipeline_output.get("meta_review", "")
-
-    gen_prompt, gen_completion = _estimate_generation_tokens(paper_text, proposals)
-    score_prompt, score_completion = _estimate_scoring_tokens(paper_text, scored)
-    critiques = selection.get("critiques", [])
-
-    # Check if revisions happened (indicated by presence of original_high_quality)
-    original_high_quality = selection.get("original_high_quality")
-    # Critiques are always based on original proposals, not revised ones
-    proposals_for_critiques = (
-        original_high_quality
-        if original_high_quality
-        else selection.get("high_quality", [])
-    )
-    critique_prompt, critique_completion = _estimate_critique_tokens(
-        paper_text,
-        proposals_for_critiques,
-        critiques,
-    )
-
-    revised_proposals = (
-        selection.get("high_quality", []) if original_high_quality else []
-    )
-
-    revision_prompt, revision_completion = 0, 0
-    rescore_prompt, rescore_completion = 0, 0
-
-    if revised_proposals and original_high_quality:
-        # Estimate revision tokens: revise proposals based on critiques
-        revision_prompt, revision_completion = _estimate_revision_tokens(
-            paper_text,
-            original_high_quality,
-            critiques,
-        )
-        # Estimate re-scoring tokens: two-pass scoring of revised proposals
-        rescore_prompt, rescore_completion = _estimate_rescoring_tokens(
-            paper_text,
-            revised_proposals,
+        cost = (
+            non_cached_input * pricing["input"]
+            + cached * pricing["cached_input"]
+            + usage["completion_tokens"] * pricing["output"]
         )
 
-    meta_prompt, meta_completion = _estimate_meta_tokens(
-        selection, meta_review_text, top_k
-    )
+        stages[stage_name] = {
+            "model": model,
+            "prompt_tokens": usage["prompt_tokens"],
+            "completion_tokens": usage["completion_tokens"],
+            "cached_tokens": cached,
+            "requests": usage["requests"],
+            "cost_usd": cost,
+        }
 
-    stages = {
-        "generation": _stage_cost_summary(gen_prompt, gen_completion, gen_model),
-        "scoring": _stage_cost_summary(score_prompt, score_completion, SCORING_MODEL),
-        "critiques": _stage_cost_summary(
-            critique_prompt,
-            critique_completion,
-            gen_model,
-        ),
-    }
-
-    # Add revision and re-scoring stages if they occurred
-    if revision_prompt > 0 or revision_completion > 0:
-        stages["revision"] = _stage_cost_summary(
-            revision_prompt, revision_completion, gen_model
-        )
-
-    if rescore_prompt > 0 or rescore_completion > 0:
-        stages["re_scoring"] = _stage_cost_summary(
-            rescore_prompt, rescore_completion, SCORING_MODEL
-        )
-
-    stages["meta_review"] = _stage_cost_summary(
-        meta_prompt, meta_completion, META_MODEL
-    )
-
-    total_prompt_tokens = sum(stage["prompt_tokens"] for stage in stages.values())
-    total_completion_tokens = sum(
-        stage["completion_tokens"] for stage in stages.values()
-    )
-    total_cost = sum((stage["cost_usd"] or 0.0) for stage in stages.values())
+    total_prompt = sum(s["prompt_tokens"] for s in stages.values())
+    total_completion = sum(s["completion_tokens"] for s in stages.values())
+    total_cached = sum(s.get("cached_tokens", 0) for s in stages.values())
+    total_cost = sum(s["cost_usd"] for s in stages.values())
+    total_requests = sum(s["requests"] for s in stages.values())
 
     return {
         "stages": stages,
-        "total_prompt_tokens": total_prompt_tokens,
-        "total_completion_tokens": total_completion_tokens,
-        "total_tokens": total_prompt_tokens + total_completion_tokens,
+        "total_prompt_tokens": total_prompt,
+        "total_completion_tokens": total_completion,
+        "total_cached_tokens": total_cached,
+        "total_tokens": total_prompt + total_completion,
         "total_cost_usd": total_cost,
+        "total_requests": total_requests,
+        "source": "actual",
     }
 
 
@@ -1387,29 +1555,41 @@ async def full_feedback_pipeline(
         if progress_callback:
             progress_callback(step, total, message)
 
-    total_steps = 6  # Generation, Scoring, Critique, Revision, Re-scoring, Meta-review
+    total_steps = 8  # Generation, Grounding, Scoring, Critique, Revision, Re-scoring, Clustering, Meta-review
+    tracker = UsageTracker()
 
     # 1. Create workers dynamically
     workers = create_worker_assignments(num_agents)
 
+    tracker.set_stage("generation")
     report_progress(1, total_steps, f"Generating proposals with {num_agents} agents...")
-    proposals, failed_generations = await generate_all_proposals(paper_text, workers, gen_model)
+    proposals, failed_generations = await generate_all_proposals(paper_text, workers, gen_model, tracker=tracker)
 
     if failed_generations:
         print(f"Warning: {len(failed_generations)} of {num_agents} proposal generations failed", file=sys.stderr)
     if not proposals:
         raise ValueError("All proposal generations failed. Check your API key and network connection.")
 
-    report_progress(2, total_steps, "Scoring proposals (dual-pass for bias removal)...")
-    scored = await score_all_proposals(paper_text, proposals)
+    # 1b. Grounding check: flag proposals that reference entities not in the paper
+    report_progress(2, total_steps, "Checking proposal grounding...")
+    proposals = check_all_groundings(proposals, paper_text)
+    flagged_count = sum(1 for p in proposals if p.get("grounding_flag"))
+    if flagged_count:
+        _progress(f"  {flagged_count} proposal(s) flagged for ungrounded references")
 
-    selection = select_and_classify(scored, top_k)
+    tracker.set_stage("scoring")
+    report_progress(3, total_steps, "Scoring proposals (dual-pass for bias removal)...")
+    scored = await score_all_proposals(paper_text, proposals, tracker=tracker)
 
-    report_progress(3, total_steps, "Running critique round...")
-    critiques = await run_critique_round(paper_text, selection.get("high_quality", []))
+    selection = await select_and_classify(scored, top_k, tracker=tracker)
+
+    tracker.set_stage("critique")
+    report_progress(4, total_steps, "Running critique round...")
+    critiques = await run_critique_round(paper_text, selection.get("high_quality", []), tracker=tracker)
     selection["critiques"] = critiques
 
-    report_progress(4, total_steps, "Revising proposals based on critiques...")
+    tracker.set_stage("revision")
+    report_progress(5, total_steps, "Revising proposals based on critiques...")
     revise_k = min(top_k, len(selection.get("high_quality", [])))
     revised = await run_revision_round(
         paper_text,
@@ -1417,26 +1597,49 @@ async def full_feedback_pipeline(
         critiques,
         revise_k=revise_k,
         model=gen_model,
+        tracker=tracker,
     )
 
     if revised:
-        report_progress(5, total_steps, "Re-scoring revised proposals...")
-        scored_revised = await score_all_proposals(paper_text, revised)
+        tracker.set_stage("re_scoring")
+        report_progress(6, total_steps, "Re-scoring revised proposals...")
+        scored_revised = await score_all_proposals(paper_text, revised, tracker=tracker)
         revised_ids = {p["id"] for p in scored_revised}
 
         merged_scored = scored_revised + [
             p for p in selection["high_quality"] if p["id"] not in revised_ids
         ]
 
-        selection_revised = select_and_classify(merged_scored, top_k)
+        selection_revised = await select_and_classify(merged_scored, top_k, tracker=tracker)
         selection_revised["critiques"] = critiques
         selection_revised["original_high_quality"] = selection["high_quality"]
         selection = selection_revised
     else:
-        report_progress(5, total_steps, "No revisions needed, skipping re-scoring...")
+        report_progress(6, total_steps, "No revisions needed, skipping re-scoring...")
 
-    report_progress(6, total_steps, "Synthesizing meta-review...")
-    meta = await meta_review(selection, top_k)
+    # Cluster-then-synthesize: group related proposals before meta-review
+    tracker.set_stage("clustering")
+    report_progress(7, total_steps, "Clustering related proposals...")
+    high_quality = selection.get("high_quality", [])
+    if len(high_quality) > 2:
+        clustered, num_synthesized = await cluster_proposals(
+            high_quality, model=gen_model, tracker=tracker
+        )
+        if num_synthesized > 0:
+            _progress(f"  Synthesized {num_synthesized} cluster(s) from {len(high_quality)} proposals into {len(clustered)}")
+            selection["high_quality"] = clustered
+            selection["num_clusters_synthesized"] = num_synthesized
+            # Rebuild by_dimension for clustered proposals
+            by_dimension = {dim: [] for dim in DIMENSIONS}
+            for p in clustered:
+                dim = p.get("dimension")
+                if dim in by_dimension:
+                    by_dimension[dim].append(p)
+            selection["by_dimension"] = by_dimension
+
+    tracker.set_stage("meta_review")
+    report_progress(8, total_steps, "Synthesizing meta-review...")
+    meta = await meta_review(selection, top_k, tracker=tracker)
 
     result = {
         "proposals": proposals,
@@ -1444,10 +1647,7 @@ async def full_feedback_pipeline(
         "selection": selection,
         "meta_review": meta,
     }
-    # Pass gen_model and top_k here for accurate pricing
-    result["cost_estimate"] = estimate_pipeline_cost(
-        paper_text, result, gen_model, top_k
-    )
+    result["actual_usage"] = compute_actual_cost(tracker, gen_model)
     return result
 
 
@@ -1468,8 +1668,14 @@ __all__ = [
     "score_all_proposals",
     "select_and_classify",
     "meta_review",
-    "estimate_pipeline_cost",
+    "compute_actual_cost",
     "estimate_cost_before_run",
+    "check_grounding",
+    "check_all_groundings",
+    "embed_texts",
+    "deduplicate_proposals",
+    "cluster_proposals",
+    "UsageTracker",
 ]
 
 
@@ -1569,16 +1775,25 @@ def _format_cost_estimate(cost: Dict[str, Any]) -> str:
     for stage_name, summary in cost.get("stages", {}).items():
         cost_usd = summary.get("cost_usd")
         cost_str = f"${cost_usd:.4f}" if cost_usd is not None else "n/a"
+        cached = summary.get("cached_tokens", 0)
+        cached_str = f", cached={cached}" if cached else ""
+        requests = summary.get("requests")
+        req_str = f", reqs={requests}" if requests else ""
         lines.append(
             f"- {stage_name}: prompt={summary.get('prompt_tokens', 0)}, "
-            f"completion={summary.get('completion_tokens', 0)}, cost≈{cost_str}"
+            f"completion={summary.get('completion_tokens', 0)}{cached_str}{req_str}, "
+            f"cost={cost_str}"
         )
     total_cost = cost.get("total_cost_usd")
     total_cost_str = f"${total_cost:.4f}" if total_cost is not None else "n/a"
+    total_cached = cost.get("total_cached_tokens", 0)
+    cached_note = f", cached={total_cached}" if total_cached else ""
+    total_requests = cost.get("total_requests")
+    req_note = f", reqs={total_requests}" if total_requests else ""
     lines.append(
-        f"- total: prompt={cost.get('total_prompt_tokens', 0)}, "
-        f"completion={cost.get('total_completion_tokens', 0)}, "
-        f"cost≈{total_cost_str}"
+        f"- TOTAL: prompt={cost.get('total_prompt_tokens', 0)}, "
+        f"completion={cost.get('total_completion_tokens', 0)}{cached_note}{req_note}, "
+        f"cost={total_cost_str}"
     )
     return "\n".join(lines)
 
@@ -1704,10 +1919,10 @@ def main(argv: List[str] | None = None) -> int:
     print(result["meta_review"])
 
     if not args.no_cost_estimate:
-        cost = result.get("cost_estimate")
-        if cost:
-            print("\n---\nApproximate token usage (tiktoken)")
-            print(_format_cost_estimate(cost))
+        usage = result.get("actual_usage")
+        if usage:
+            print("\n---\nActual token usage")
+            print(_format_cost_estimate(usage))
 
     return 0
 
