@@ -135,6 +135,29 @@ def _extract_paper_title(paper_text: str, max_len: int = 60) -> str:
     return fallback
 
 
+def _extract_topic_from_meta_review(meta_review: str) -> str:
+    """Extract a short topic phrase from the meta-review's opening paragraphs.
+
+    Looks for quoted phrases (which typically name the paper's key concepts)
+    and picks the longest one as the most descriptive.
+    """
+    import re
+
+    # Search first 800 chars for quoted phrases (straight and curly quotes)
+    quotes = re.findall(
+        r'["\u201c]([^"\u201c\u201d]{4,50})["\u201d]',
+        meta_review[:800],
+    )
+    # Filter out generic phrases that aren't topic-specific
+    generic = {"what is new", "what is the contribution", "why does this matter"}
+    quotes = [q for q in quotes if q.lower().strip() not in generic]
+    if quotes:
+        # Pick the longest phrase as the most descriptive
+        best = max(quotes, key=len)
+        return best.strip().capitalize()
+    return ""
+
+
 st.set_page_config(
     page_title="Paper Feedback Pipeline",
     page_icon="📝",
@@ -285,7 +308,9 @@ with st.sidebar:
         for entry in reversed(history[-10:]):
             title = entry.get("title", "")
             if not title or title.lstrip().startswith("\\"):
-                # Old entries without title or title is LaTeX preamble
+                # Old entries without title — try meta-review, then paper_preview
+                title = _extract_topic_from_meta_review(entry.get("meta_review", ""))
+            if not title or title.lstrip().startswith("\\"):
                 title = _extract_paper_title(entry.get("paper_preview", ""))
             if not title or title.lstrip().startswith("\\"):
                 title = "Paper feedback"
@@ -431,6 +456,8 @@ if st.session_state.selected_history_id:
                 "actual_usage": entry.get("actual_usage") or entry.get("cost_estimate"),
             }
             hist_title = entry.get("title", "")
+            if not hist_title or hist_title.lstrip().startswith("\\"):
+                hist_title = _extract_topic_from_meta_review(entry.get("meta_review", ""))
             if not hist_title or hist_title.lstrip().startswith("\\"):
                 hist_title = _extract_paper_title(entry.get("paper_preview", ""))
             if not hist_title or hist_title.lstrip().startswith("\\"):
