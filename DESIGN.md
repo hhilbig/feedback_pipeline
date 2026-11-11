@@ -63,7 +63,8 @@ Paper text
 
 **Streamlit app:** `streamlit_app.py`
 
-- Requires `OPENAI_API_KEY` from `.env` or the environment.
+- Requires an OpenRouter key (`OPENROUTER_API_KEY` or `~/.openrouter_api_key`), or
+  `OPENAI_API_KEY` with `LLM_PROVIDER=openai`.
 - Accepts pasted text or uploaded PDFs.
 - Lets the user choose generation model, number of agents, and `top_k`.
 - Lets the user choose editorial triage or comprehensive audit mode.
@@ -104,6 +105,11 @@ Paper text
 - `--eval-memory-mode none` runs the cold baseline. Historical feedback remains
   local for scoring and neither a review corpus nor a review prior reaches the pipeline.
 - `--eval-adjudication PATH` supplies completed gold labels for a manifest run.
+- `--eval-gold-mode complete` is the default and requires every cluster screen.
+  `--eval-gold-mode partial` freezes only the currently completed labels after
+  confirming that every sampled row and every row screened as major is fully
+  adjudicated. Partial results use an adjudicated-only denominator and are never
+  reported as exhaustive major recall.
 - `--finalize-review-eval LOCAL_AUDIT` combines the completed gold and generated
   packets into privacy-safe aggregate metrics without an API call.
 - `--eval-max-cost-usd N` is mandatory with `--eval-run-api`. Evaluation performs
@@ -116,9 +122,9 @@ Paper text
   is stage-by-stage: each concurrent wave is submitted, polled to completion, and
   then the next local stage proceeds. Local JSONL inputs and a batch manifest are
   written under the requested batch output directory.
-- `--eval-run-api` actually runs the held-out evaluation. Manifest evaluation also
-  requires current, complete gold adjudication. The runner checks the remaining
-  cost allowance before each manuscript family.
+- `--eval-run-api` actually runs the held-out evaluation. Manifest evaluation
+  requires current gold under the selected gold mode. The runner checks the
+  remaining cost allowance before each manuscript family.
 
 ### Historical Review Corpus
 
@@ -173,16 +179,19 @@ available. The implementation:
   only. Prompts explicitly forbid importing facts from historical reviews.
 - Adds `reviewer_likelihood_score`, `decision_risk_score`, and
   `similar_issue_ids` to proposals when `--review-corpus` is enabled.
-- Provides local held-out evaluation scaffolding through
-  `compare_generated_to_human_issues()`. Matching now uses a local semantic
+- Provides local held-out evaluation scaffolding for legacy archives through
+  `compare_generated_to_human_issues()`. Matching uses a local semantic
   matcher: weighted issue-concept/token features retrieve the nearest held-out
   review issue, and a rule-based verifier labels matched, partially matched, or
-  novel/unmatched issues. It is still local and non-API, not a paid LLM verifier.
+  novel/unmatched issues. Manifest benchmarks do not use this provisional
+  comparison because their generated issues require manual labels.
 - Provides a whole-paper held-out eval harness through
   `run_historical_review_eval()`. Manifest splits exclude the complete manuscript
   family; legacy splits retain paper-ID fallback behavior. The cold baseline passes
   `review_corpus=None` and `review_prior=None` explicitly. It scores the final
-  post-verification `top_proposals[:5]`, not the larger candidate pool.
+  post-verification `top_proposals[:5]`, not the larger candidate pool. A
+  successful manifest case may return one to five real issues; the evaluator
+  never pads a short result with placeholder rows.
 - Plans every selected case and totals its estimated cost before any API request.
   Paid mode requires a positive cost ceiling and checks the remaining allowance
   before each case. A paid pilot rejects partial selections and requires the fixed
@@ -226,31 +235,116 @@ canonical wording, severity, evidentiary support, duplicate corrections, and an
 exclusion reason where relevant. Its binding hash changes when source content,
 manuscript content, extraction rules, or cluster membership changes.
 
-After a paid run, a second packet contains the final five generated issues per case.
-Every row requires correctness, significance, evidence sufficiency, match status,
-duplicate status, and valid-novelty labels. Lexical matching supplies suggestions
-only. An unmatched generated concern is not counted as false until a person labels
-it. A completed paid generation run remains `pending_human_adjudication` until
-all top-five labels are current; incomplete family runs cannot reach that state.
-Final aggregate metrics are produced only when both packets are current and
-complete. They report family-macro major-cluster recall, the journal-only subset,
+After a paid run, a second packet contains the final post-verification issues, up
+to five per case. Every row requires correctness, significance, evidence
+sufficiency, match status, duplicate status, and valid-novelty labels. Lexical
+matching supplies suggestions only. An unmatched generated concern is not counted
+as false until a person labels it. Each successful case must contain one to five
+contiguously ranked issues; no synthetic fifth row is added.
+
+The local adjudication app edits this packet one generated issue at a time. It
+shows the critique, evidence IDs, rank within the manuscript, same-family gold
+choices, and same-case duplicate choices. Saving is revision-guarded and atomic.
+The editor may change only the nine manual label and note fields; it rejects
+changes to issue text, evidence, rank, identifiers, bindings, row count, or row
+order. It also rebuilds the paid-run binding from the current private manifest,
+gold projection, and local audit before enabling a save.
+
+The benchmark treats each case as five available output slots. Missing slots count
+as misses for supported-significant precision@5 and valid-novelty yield@5. Human
+cluster recall keeps its human-target denominator, while duplicate rate uses only
+the issues actually returned. The run metadata and generated-packet binding include
+this output-cardinality policy.
+
+After every completed case, the runner atomically rewrites a private in-progress
+packet containing full issue text and evidence IDs. After all cases finish, it
+writes a content-addressed checkpoint before applying the final run audit. A failed
+audit does not create or replace the canonical packet, but its checkpoint remains
+available locally. Neither checkpoint metadata nor checkpoint content enters the
+portable projection.
+
+A completed paid generation run remains `pending_human_adjudication` until all
+returned issue labels are current; incomplete family runs cannot reach that state.
+Final aggregate metrics are produced only when the generated packet is current and
+complete. In complete-gold mode, the gold packet must also contain every tier
+screen; results report family-macro major-cluster recall, the journal-only subset,
 sampled-minor recall, supported-significant precision, valid-novelty yield,
 duplicate rate, and cost. Secondary cases remain outside the primary aggregate.
 
+Partial-gold mode is an explicit exploratory exception to the complete-screen
+gate. It first verifies that every deterministic minor-sample row and every row
+screened as major has all required fields. It binds the source packet, the set of
+completed rows, and every scoring-relevant label into a new evaluation hash.
+Only fully adjudicated rows marked `include=yes` can be proposed as matches,
+confirmed as human-cluster matches, or enter metric denominators. Completed
+exclusions and tier-only minor screens count toward coverage but not scoring.
+Completing another row or changing a substantive label invalidates the earlier
+generated packet. Partial output reports completed-row coverage, the eligible
+scoring count, and the number of primary families with a validated-major
+denominator. It omits unqualified exhaustive major-recall field names.
+
 ### Models and Routing
 
-The model registry is defined in `MODEL_REGISTRY`. Defaults are:
+The model registry is defined in `MODEL_REGISTRY`. A stage's model is written
+`MODEL` or `MODEL@EFFORT`, where the effort is that stage's reasoning effort.
+Defaults since 2026-11-11:
 
-- Generation: `gpt-5.6-terra` (`reasoning_effort="none"`)
-- Scoring: `gpt-5.6-terra` (`reasoning_effort="none"`)
-- Verification: `gpt-5.6-terra` (`reasoning_effort="none"`)
-- Rewrite and simple labels: `gpt-5.6-luna` (`reasoning_effort="none"`)
-- Editorial triage: `gpt-5.6-sol` (`reasoning_effort="medium"`)
-- Meta-review: `gpt-5.6-sol` (`reasoning_effort="medium"`)
-- Escalation: `gpt-5.6-sol` (`reasoning_effort="medium"`)
+- Generation: `gpt-6.1-sol@medium`
+- Scoring: `gpt-6.1-terra@low`
+- Evidence map and verification: `gpt-6.1-sol@low`
+- Rewrite and simple labels: `gpt-6-luna@none`
+- Editorial triage, meta-review, escalation: `gpt-6.1-sol@medium`
+
+The change puts a frontier model with reasoning on the stages that judge the paper.
+Before it, generation, scoring, and verification ran on GPT-5.6 Terra without
+reasoning. The motivation is external: an independent benchmark of review systems
+(arXiv 2606.19749) finds base model strength matters more than scaffolding for
+detecting errors. The new routing has not been evaluated on the private benchmark.
+
+Generation uses a reviewer panel. `GENERATION_PANEL` lists three models from different
+vendors, assigned to reviewers in rotation (`generation_models_for_workers()`), so the
+paired roles come from different vendors. The motivation is the same benchmark: pooled
+detections across six models reached 83.3% recall against 71.6% for the best single
+model. Each reviewer may return up to `CRITIQUES_PER_REVIEWER = 2` critiques; the prompt
+asks for a second only when it is a different problem, cites different evidence or
+affects a different claim, and merits severity 3 or higher. A reviewer's first critique
+keeps the reviewer id; later ones get `id + 1000 * (rank - 1)` and carry `reviewer_id`,
+`critique_rank`, and `generation_model`. Reviewer-prior gap workers still use one model
+and one critique. Usage is tracked per model within a stage so a mixed stage is priced
+correctly when the provider reports no cost. The panel needs OpenRouter: with OpenAI
+direct or in Batch API mode only its OpenAI members are used, which leaves a single
+generation model. Neither the panel nor the critique limit has been evaluated on the
+private benchmark. More candidates also means more work for scoring and verification;
+pre-run estimates assume every reviewer uses the full allowance.
+
+`ROUTING_PRESETS` holds the named routings. `baseline-gpt-5.6` is the routing of the
+completed private baseline (Terra/Luna without reasoning, Sol at medium, no panel, one
+critique per reviewer) and must stay
+unchanged so that run remains reproducible. `build_model_routing()` resolves each stage
+from its own argument, then `all_stages_model`, then the preset. Efforts are validated
+against `MODEL_REASONING_OPTIONS`. Pre-run estimates multiply assumed output tokens by
+`REASONING_OUTPUT_MULTIPLIER`, a planning heuristic relative to the effort each stage
+was calibrated at; it is not measured.
 
 Previous GPT-5 family models remain allowed for reproducibility. The registry includes
 pricing so estimates and actual usage can be reconciled by stage.
+
+The registry also lists models from other vendors. They are selectable for any stage
+through OpenRouter. Without an `@EFFORT` suffix they run at the vendor's default effort.
+
+### Provider
+
+Synchronous chat and embedding calls go through OpenRouter when an OpenRouter key
+exists, and through OpenAI otherwise; `LLM_PROVIDER` overrides the choice. Registry
+keys without a slash are OpenAI model names and work with both providers (OpenRouter
+receives `openai/<name>`). Keys with a slash are OpenRouter slugs. OpenRouter requests
+send reasoning effort as `reasoning.effort`, which OpenRouter translates per vendor, and
+carry `provider.data_collection = "deny"` because manuscripts are unpublished
+(`OPENROUTER_DATA_COLLECTION=allow` lifts this), and schema-constrained calls carry
+`provider.require_parameters = true` so a host cannot ignore the JSON schema. When
+OpenRouter reports a dollar cost for every request in a stage, `compute_actual_cost()`
+uses that figure (`cost_source = "provider_reported"`) instead of token counts times
+registry prices. Batch API mode calls OpenAI directly and accepts only OpenAI models.
 
 ### Evidence Map
 
@@ -507,7 +601,7 @@ verification, rewrite, clustering, embeddings, editorial triage, and meta-review
 
 ### Reliability and Safety Features
 
-- The OpenAI client is lazy, so imports and offline tests do not require an API key.
+- The API client is lazy, so imports and offline tests do not require an API key.
 - System prompts treat manuscript text as untrusted data.
 - Instruction-like manuscript lines are quarantined before review agents see text.
 - Structured stages use strict JSON Schema outputs.
@@ -530,5 +624,5 @@ Current test modules cover:
 - mocked end-to-end pipeline behavior
 - manifest validation, PDF/Word/text extraction, source deduplication, ordered
   manuscript bundles, dataless cloud rejection, and legacy-loader compatibility
-- family-level leakage controls, cold-baseline prompt isolation, top-five scoring,
+- family-level leakage controls, cold-baseline prompt isolation, up-to-five scoring,
   cost ceilings, portable output privacy, and deterministic adjudication artifacts

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Sequence, Tuple
 
 # --- Smart API Key Loading ---
 from dotenv import load_dotenv
@@ -48,9 +48,15 @@ and can be refined later.
 
 
 MODEL_REGISTRY = {
-    # Current model family and standard short-context prices, verified against
-    # OpenAI docs on 2026-08-02.
+    # Keys without a slash are OpenAI model names. They work with either
+    # provider: OpenRouter receives them as "openai/<name>". Keys with a slash
+    # are OpenRouter slugs and need LLM_PROVIDER=openrouter.
+    #
+    # GPT-5.6 is the family behind the default routing. Standard short-context
+    # prices re-verified against OpenAI's pricing page on 2026-11-11.
     "gpt-5.6-sol": {
+        # List price. OpenAI charges a promotional $4/$20/$0.40 until
+        # 2026-11-30, so estimates for Sol run high until then.
         "input": 5.00 / 1e6,
         "output": 30.00 / 1e6,
         "cached_input": 0.50 / 1e6,
@@ -69,6 +75,117 @@ MODEL_REGISTRY = {
         "output": 1.20 / 1e6,
         "cached_input": 0.02 / 1e6,
         "label": "Efficient model for simple structured tasks",
+        "current": True,
+    },
+    # Newer OpenAI families (OpenAI pricing page, 2026-11-11). Not part of the
+    # default routing; no reasoning effort is pinned for them.
+    "gpt-6.1-sol": {
+        "input": 2.00 / 1e6,
+        "output": 10.00 / 1e6,
+        "cached_input": 0.10 / 1e6,
+        "label": "OpenAI GPT-6.1 frontier tier",
+        "current": True,
+    },
+    "gpt-6.1-terra": {
+        "input": 1.00 / 1e6,
+        "output": 5.00 / 1e6,
+        "cached_input": 0.05 / 1e6,
+        "label": "OpenAI GPT-6.1 balanced tier",
+        "current": True,
+    },
+    "gpt-6-luna": {
+        "input": 0.10 / 1e6,
+        "output": 0.50 / 1e6,
+        "cached_input": 0.01 / 1e6,
+        "label": "OpenAI GPT-6 efficient tier",
+        "current": True,
+    },
+    "gpt-6-astra": {
+        "input": 10.00 / 1e6,
+        "output": 50.00 / 1e6,
+        "cached_input": 1.00 / 1e6,
+        "label": "OpenAI GPT-6 highest-cost tier",
+        "current": True,
+    },
+    # Other vendors, OpenRouter only. Prices are OpenRouter's listed rates on
+    # 2026-11-11 and are used for estimates; actual cost comes from the cost
+    # OpenRouter reports per request. Open-weight models are served by several
+    # hosts at different prices, so their estimates are approximate.
+    "anthropic/claude-fable-5.2": {
+        "input": 8.00 / 1e6,
+        "output": 40.00 / 1e6,
+        "cached_input": 0.20 / 1e6,
+        "label": "Anthropic frontier tier",
+        "current": True,
+    },
+    "anthropic/claude-opus-5.5": {
+        "input": 4.00 / 1e6,
+        "output": 20.00 / 1e6,
+        "cached_input": 0.20 / 1e6,
+        "label": "Anthropic high tier",
+        "current": True,
+    },
+    "anthropic/claude-sonnet-5.5": {
+        "input": 2.00 / 1e6,
+        "output": 10.00 / 1e6,
+        "cached_input": 0.10 / 1e6,
+        "label": "Anthropic balanced tier",
+        "current": True,
+    },
+    "anthropic/claude-haiku-5.5": {
+        "input": 0.10 / 1e6,
+        "output": 0.50 / 1e6,
+        "cached_input": 0.01 / 1e6,
+        "label": "Anthropic efficient tier",
+        "current": True,
+    },
+    "google/gemini-4-carbon": {
+        "input": 2.00 / 1e6,
+        "output": 10.00 / 1e6,
+        "cached_input": 0.10 / 1e6,
+        "label": "Google frontier tier",
+        "current": True,
+    },
+    "google/gemini-3.8-flash": {
+        "input": 0.825 / 1e6,
+        "output": 4.125 / 1e6,
+        "cached_input": 0.0825 / 1e6,
+        "label": "Google efficient tier",
+        "current": True,
+    },
+    "x-ai/grok-4.7": {
+        "input": 2.00 / 1e6,
+        "output": 6.00 / 1e6,
+        "cached_input": 0.50 / 1e6,
+        "label": "xAI frontier tier",
+        "current": True,
+    },
+    "moonshotai/kimi-k3.1-pro": {
+        "input": 2.00 / 1e6,
+        "output": 10.00 / 1e6,
+        "cached_input": 0.20 / 1e6,
+        "label": "Moonshot open-weight frontier tier",
+        "current": True,
+    },
+    "qwen/qwen3.8-max-0902": {
+        "input": 2.00 / 1e6,
+        "output": 6.00 / 1e6,
+        "cached_input": 0.25 / 1e6,
+        "label": "Qwen frontier tier",
+        "current": True,
+    },
+    "mistralai/mistral-large-4-0": {
+        "input": 0.70 / 1e6,
+        "output": 2.10 / 1e6,
+        "cached_input": 0.07 / 1e6,
+        "label": "Mistral large tier",
+        "current": True,
+    },
+    "deepseek/deepseek-v4.1-flash": {
+        "input": 0.051 / 1e6,
+        "output": 0.567 / 1e6,
+        "cached_input": 0.018 / 1e6,
+        "label": "DeepSeek efficient tier",
         "current": True,
     },
     # Previous families remain allowed for reproducibility of older runs.
@@ -154,23 +271,115 @@ MODEL_PRICING = {
     for name, spec in MODEL_REGISTRY.items()
 }
 
-GENERATION_MODEL = "gpt-5.6-terra"
-SCORING_MODEL = "gpt-5.6-terra"
-VERIFICATION_MODEL = "gpt-5.6-terra"
-REWRITE_MODEL = "gpt-5.6-luna"
-CLUSTER_LABEL_MODEL = "gpt-5.6-luna"
-META_MODEL = "gpt-5.6-sol"
-ESCALATION_MODEL = "gpt-5.6-sol"
-TRIAGE_MODEL = "gpt-5.6-sol"
+# A stage's model is written "model" or "model@effort", where effort is the
+# reasoning effort for that stage (for example "gpt-6.1-sol@medium").
+#
+# Default routing since 2026-11-11: the GPT-6.1 family with reasoning switched
+# on for the stages that judge the paper. The previous routing ran generation,
+# scoring, and verification on GPT-5.6 Terra without reasoning; it remains
+# available as the "baseline-gpt-5.6" preset. The new routing has not been
+# evaluated on the private benchmark.
+GENERATION_MODEL = "gpt-6.1-sol@medium"
+SCORING_MODEL = "gpt-6.1-terra@low"
+VERIFICATION_MODEL = "gpt-6.1-sol@low"
+REWRITE_MODEL = "gpt-6-luna@none"
+CLUSTER_LABEL_MODEL = "gpt-6-luna@none"
+META_MODEL = "gpt-6.1-sol@medium"
+ESCALATION_MODEL = "gpt-6.1-sol@medium"
+TRIAGE_MODEL = "gpt-6.1-sol@medium"
 
-# Preserve the effective reasoning behavior of the replaced models. GPT-5.4
-# mini/nano defaulted to none; GPT-5.5 defaulted to medium. GPT-5.6 defaults to
-# medium across tiers, so Terra/Luna must be explicit to avoid a silent change.
+# Reviewers are assigned panel models in rotation, so the paired roles
+# (two theorists, two rivals, two methodologists) come from different vendors.
+# Motivation: models catch different errors (arXiv 2606.19749 reports 83.3%
+# pooled recall across six models against 71.6% for the best single one). Not
+# yet evaluated on the private benchmark. Needs OpenRouter; with OpenAI direct
+# or in Batch API mode only the OpenAI members are used.
+GENERATION_PANEL: Tuple[str, ...] = (
+    "gpt-6.1-sol@medium",
+    "anthropic/claude-opus-5.5@medium",
+    "google/gemini-4-carbon@medium",
+)
+# Upper limit of critiques one reviewer may return. The prompt asks for a
+# second critique only when it is a distinct, well-supported problem.
+CRITIQUES_PER_REVIEWER = 2
+MAX_CRITIQUES_PER_REVIEWER = 5
+
+REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+# Effort applied when a GPT-5.6 model is named without "@effort". These values
+# define the baseline preset: GPT-5.6 defaults to medium across tiers, so
+# Terra/Luna must be explicit to keep reasoning off.
 MODEL_REASONING_EFFORT = {
     "gpt-5.6-sol": "medium",
     "gpt-5.6-terra": "none",
     "gpt-5.6-luna": "none",
 }
+
+# Efforts each model accepts and its own default, from OpenRouter's model list
+# on 2026-11-11. Models without an entry are not checked.
+_EFFORTS_FULL = ("max", "xhigh", "high", "medium", "low", "none")
+_EFFORTS_NO_NONE = ("max", "xhigh", "high", "medium", "low")
+MODEL_REASONING_OPTIONS: Dict[str, Tuple[Tuple[str, ...], str]] = {
+    "gpt-5.6-sol": (_EFFORTS_FULL, "medium"),
+    "gpt-5.6-terra": (_EFFORTS_FULL, "medium"),
+    "gpt-5.6-luna": (_EFFORTS_FULL, "medium"),
+    "gpt-6.1-sol": (_EFFORTS_NO_NONE, "medium"),
+    "gpt-6.1-terra": (_EFFORTS_FULL, "medium"),
+    "gpt-6-luna": (_EFFORTS_FULL, "medium"),
+    "gpt-6-astra": (_EFFORTS_NO_NONE, "medium"),
+    "anthropic/claude-fable-5.2": (_EFFORTS_NO_NONE, "high"),
+    "anthropic/claude-opus-5.5": (_EFFORTS_NO_NONE, "high"),
+    "anthropic/claude-sonnet-5.5": (_EFFORTS_NO_NONE, "high"),
+    "anthropic/claude-haiku-5.5": (_EFFORTS_FULL, "medium"),
+    "google/gemini-4-carbon": (("high", "medium", "low"), "medium"),
+    "google/gemini-3.8-flash": (("high", "medium", "low"), "medium"),
+    "x-ai/grok-4.7": (("xhigh", "high", "medium", "low"), "high"),
+    "moonshotai/kimi-k3.1-pro": (("max", "high", "low", "none"), "max"),
+    "qwen/qwen3.8-max-0902": (("xhigh", "high", "medium", "low", "minimal"), "xhigh"),
+    "mistralai/mistral-large-4-0": (("high", "none"), "high"),
+    "deepseek/deepseek-v4.1-flash": (("max", "high", "low", "none"), "high"),
+}
+
+# Planning heuristic, not a measurement: how many output tokens a stage bills
+# at each effort relative to no reasoning. Reasoning tokens are billed as
+# output. Used only to scale pre-run estimates.
+REASONING_OUTPUT_MULTIPLIER = {
+    "none": 1.0,
+    "minimal": 1.2,
+    "low": 1.5,
+    "medium": 2.5,
+    "high": 4.0,
+    "xhigh": 6.0,
+    "max": 6.0,
+}
+
+
+def split_model_spec(spec: str) -> Tuple[str, str | None]:
+    """Split "model@effort" into the registry model name and the effort."""
+    name, _, effort = spec.partition("@")
+    return name, (effort or None)
+
+
+def model_reasoning_effort(spec: str) -> str | None:
+    """Reasoning effort to request for a stage, or None for the model default."""
+    name, effort = split_model_spec(spec)
+    return effort or MODEL_REASONING_EFFORT.get(name)
+
+
+def _reasoning_output_multiplier(spec: str, calibrated_effort: str) -> float:
+    """Scale an estimate's output tokens for the stage's reasoning effort.
+
+    The output-length assumptions in estimate_cost_before_run were calibrated
+    on the baseline routing, where a stage ran at ``calibrated_effort``.
+    """
+    name, _ = split_model_spec(spec)
+    effort = model_reasoning_effort(spec)
+    if effort is None:
+        effort = MODEL_REASONING_OPTIONS.get(name, ((), "medium"))[1]
+        if name not in MODEL_REASONING_OPTIONS:
+            # Legacy models: no reasoning information, keep the old estimate.
+            return 1.0
+    return REASONING_OUTPUT_MULTIPLIER[effort] / REASONING_OUTPUT_MULTIPLIER[calibrated_effort]
 
 
 @dataclass(frozen=True)
@@ -185,9 +394,30 @@ class ModelRoutingConfig:
     editorial_triage: str = TRIAGE_MODEL
     meta_review: str = META_MODEL
     escalation: str = ESCALATION_MODEL
+    # Models rotated across reviewers; empty means every reviewer uses `generation`.
+    generation_panel: Tuple[str, ...] = GENERATION_PANEL
+    critiques_per_reviewer: int = CRITIQUES_PER_REVIEWER
 
 
 DEFAULT_MODEL_ROUTING = ModelRoutingConfig()
+
+ROUTING_PRESETS: Dict[str, ModelRoutingConfig] = {
+    "default": DEFAULT_MODEL_ROUTING,
+    # Routing of the completed private baseline run (2026-08). Use it to
+    # reproduce or compare against that run.
+    "baseline-gpt-5.6": ModelRoutingConfig(
+        generation="gpt-5.6-terra",
+        scoring="gpt-5.6-terra",
+        verification="gpt-5.6-terra",
+        rewrite="gpt-5.6-luna",
+        clustering="gpt-5.6-luna",
+        editorial_triage="gpt-5.6-sol",
+        meta_review="gpt-5.6-sol",
+        escalation="gpt-5.6-sol",
+        generation_panel=(),
+        critiques_per_reviewer=1,
+    ),
+}
 
 DEFAULT_REVIEW_ARCHIVE_PATH = "/Users/hanno/Desktop/journal_reviews_inbox_2026-06-04"
 LOW_CONFIDENCE_REVIEW_DIRS = {"forwarded_or_low_confidence"}
@@ -278,16 +508,34 @@ class ReviewIssue:
 
 
 def _lookup_pricing_model(model: str) -> Dict[str, float]:
-    # Strict lookup only. No prefix matching.
-    if model not in MODEL_PRICING:
+    # Strict lookup only. No prefix matching. An "@effort" suffix is ignored.
+    name, _ = split_model_spec(model)
+    if name not in MODEL_PRICING:
         raise ValueError(
-            f"Model '{model}' is not allowed. Choose from: {list(MODEL_PRICING.keys())}"
+            f"Model '{name}' is not allowed. Choose from: {list(MODEL_PRICING.keys())}"
         )
-    return MODEL_PRICING[model]
+    return MODEL_PRICING[name]
 
 
 def _validate_model_name(model: str) -> str:
     _lookup_pricing_model(model)
+    name, effort = split_model_spec(model)
+    if effort is not None:
+        if effort not in REASONING_EFFORTS:
+            raise ValueError(
+                f"Reasoning effort '{effort}' in '{model}' is not one of {list(REASONING_EFFORTS)}."
+            )
+        supported = MODEL_REASONING_OPTIONS.get(name, (None, None))[0]
+        if supported is not None and effort not in supported:
+            raise ValueError(
+                f"Model '{name}' does not accept reasoning effort '{effort}'. "
+                f"Supported: {list(supported)}."
+            )
+    if not is_openai_model(model) and llm_provider() != "openrouter":
+        raise ValueError(
+            f"Model '{model}' is only reachable through OpenRouter. "
+            "Set LLM_PROVIDER=openrouter or choose an OpenAI model."
+        )
     return model
 
 
@@ -300,35 +548,166 @@ def build_model_routing(
     editorial_triage_model: str | None = None,
     meta_model: str | None = None,
     escalation_model: str | None = None,
+    preset: str | None = None,
+    all_stages_model: str | None = None,
+    generation_panel: Sequence[str] | None = None,
+    critiques_per_reviewer: int | None = None,
 ) -> ModelRoutingConfig:
-    """Build a validated routing config, preserving CLI generation override."""
+    """Build a validated routing config.
+
+    Precedence per stage: the stage's own argument, then ``all_stages_model``,
+    then the preset (the default routing when no preset is named).
+
+    The reviewer panel comes from ``generation_panel`` when given (an empty
+    sequence switches it off). Otherwise naming a generation model or
+    ``all_stages_model`` switches the preset's panel off, since the caller
+    asked for one specific generator.
+    """
+    preset = preset or "default"
+    if preset not in ROUTING_PRESETS:
+        raise ValueError(
+            f"Routing preset '{preset}' is unknown. Choose from: {list(ROUTING_PRESETS)}"
+        )
+    base = ROUTING_PRESETS[preset]
+
+    def pick(stage_model: str | None, preset_model: str) -> str:
+        return _validate_model_name(stage_model or all_stages_model or preset_model)
+
+    if generation_panel is not None:
+        panel = tuple(_validate_model_name(member) for member in generation_panel)
+    elif gen_model or all_stages_model:
+        panel = ()
+    else:
+        panel = base.generation_panel
+        if llm_provider() != "openrouter":
+            panel = tuple(member for member in panel if is_openai_model(member))
+    if len(set(panel)) < 2:
+        # One distinct model is not a panel; fall back to the generation model.
+        panel = ()
+
+    critiques = base.critiques_per_reviewer if critiques_per_reviewer is None else critiques_per_reviewer
+    if not 1 <= critiques <= MAX_CRITIQUES_PER_REVIEWER:
+        raise ValueError(
+            f"critiques_per_reviewer must be between 1 and {MAX_CRITIQUES_PER_REVIEWER}, got {critiques}."
+        )
+
     return ModelRoutingConfig(
-        generation=_validate_model_name(gen_model or DEFAULT_MODEL_ROUTING.generation),
-        scoring=_validate_model_name(scoring_model or DEFAULT_MODEL_ROUTING.scoring),
-        verification=_validate_model_name(verification_model or DEFAULT_MODEL_ROUTING.verification),
-        rewrite=_validate_model_name(rewrite_model or DEFAULT_MODEL_ROUTING.rewrite),
-        clustering=_validate_model_name(clustering_model or DEFAULT_MODEL_ROUTING.clustering),
-        editorial_triage=_validate_model_name(editorial_triage_model or DEFAULT_MODEL_ROUTING.editorial_triage),
-        meta_review=_validate_model_name(meta_model or DEFAULT_MODEL_ROUTING.meta_review),
-        escalation=_validate_model_name(escalation_model or DEFAULT_MODEL_ROUTING.escalation),
+        generation_panel=panel,
+        critiques_per_reviewer=critiques,
+        generation=pick(gen_model, panel[0] if panel and not gen_model and not all_stages_model else base.generation),
+        scoring=pick(scoring_model, base.scoring),
+        verification=pick(verification_model, base.verification),
+        rewrite=pick(rewrite_model, base.rewrite),
+        clustering=pick(clustering_model, base.clustering),
+        editorial_triage=pick(editorial_triage_model, base.editorial_triage),
+        meta_review=pick(meta_model, base.meta_review),
+        escalation=pick(escalation_model, base.escalation),
     )
 
 
+def generation_models_for_workers(routing: ModelRoutingConfig, count: int) -> List[str]:
+    """Model for each of ``count`` reviewers: the panel in rotation, or one model."""
+    panel = routing.generation_panel
+    if _ACTIVE_BATCH_CHAT_CLIENT is not None:
+        # Batch API mode calls OpenAI directly.
+        panel = tuple(member for member in panel if is_openai_model(member))
+    if len(set(panel)) < 2:
+        return [routing.generation] * count
+    return [panel[index % len(panel)] for index in range(count)]
+
+
+def _stage_model_label(models: Sequence[str]) -> str:
+    """Stage label listing each distinct model once, in first-use order."""
+    return " + ".join(dict.fromkeys(models))
+
+
 def current_model_options() -> List[str]:
-    """Return current OpenAI model options first, then legacy options."""
+    """Return current model options first, then legacy options.
+
+    Models that need OpenRouter are left out when the provider is OpenAI.
+    """
+    openrouter = llm_provider() == "openrouter"
+    names = [
+        name
+        for name in MODEL_REGISTRY
+        if openrouter or is_openai_model(name)
+    ]
     return [
-        name
-        for name, spec in MODEL_REGISTRY.items()
-        if spec.get("current")
+        name for name in names if MODEL_REGISTRY[name].get("current")
     ] + [
-        name
-        for name, spec in MODEL_REGISTRY.items()
-        if not spec.get("current")
+        name for name in names if not MODEL_REGISTRY[name].get("current")
     ]
 
 
-def ensure_api_key() -> None:
-    """Raise a readable error if no API key is configured."""
+# -------------------------------------------------------------------
+# Provider selection: OpenRouter (all registry models) or OpenAI direct
+# -------------------------------------------------------------------
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_KEY_FILE = Path.home() / ".openrouter_api_key"
+LLM_PROVIDERS = ("openrouter", "openai")
+
+
+def _openrouter_api_key() -> str | None:
+    """Return the OpenRouter key from the environment or the key file."""
+    key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        key = OPENROUTER_KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
+
+
+def llm_provider() -> str:
+    """Return the provider for synchronous chat and embedding calls.
+
+    LLM_PROVIDER decides when set. Otherwise OpenRouter is used when a key for
+    it exists, and OpenAI when only OPENAI_API_KEY exists.
+    """
+    explicit = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if explicit:
+        if explicit not in LLM_PROVIDERS:
+            raise ValueError(
+                f"LLM_PROVIDER must be one of {list(LLM_PROVIDERS)}, got '{explicit}'."
+            )
+        return explicit
+    if _openrouter_api_key() is None and os.getenv("OPENAI_API_KEY"):
+        return "openai"
+    return "openrouter"
+
+
+def is_openai_model(model: str) -> bool:
+    """True for OpenAI model names, which carry no vendor prefix."""
+    return "/" not in model
+
+
+def provider_model_id(model: str, provider: str | None = None) -> str:
+    """Translate a registry model name into the name the provider expects."""
+    provider = provider or llm_provider()
+    model, _ = split_model_spec(model)
+    if provider == "openrouter":
+        return model if "/" in model else f"openai/{model}"
+    if not is_openai_model(model):
+        raise ValueError(
+            f"Model '{model}' is only reachable through OpenRouter, "
+            "but the active provider is OpenAI."
+        )
+    return model
+
+
+def ensure_api_key(provider: str | None = None) -> None:
+    """Raise a readable error if the provider's API key is not configured."""
+    provider = provider or llm_provider()
+    if provider == "openrouter":
+        if _openrouter_api_key():
+            return
+        raise RuntimeError(
+            "No OpenRouter API key found. Set OPENROUTER_API_KEY in .env or the "
+            f"environment, or save the key in {OPENROUTER_KEY_FILE}. To call "
+            "OpenAI directly instead, set LLM_PROVIDER=openai and OPENAI_API_KEY."
+        )
     if os.getenv("OPENAI_API_KEY"):
         return
     raise RuntimeError(
@@ -337,12 +716,48 @@ def ensure_api_key() -> None:
     )
 
 
+def _openrouter_extra_body(structured: bool) -> Dict[str, Any]:
+    """OpenRouter routing preferences sent with every chat request.
+
+    Manuscripts are unpublished, so hosts that may store or train on prompts
+    are excluded unless OPENROUTER_DATA_COLLECTION=allow. Schema-constrained
+    calls only go to hosts that support every request parameter, so a host
+    cannot silently ignore the JSON schema.
+    """
+    data_collection = (os.getenv("OPENROUTER_DATA_COLLECTION") or "deny").strip().lower()
+    if data_collection not in {"allow", "deny"}:
+        raise ValueError("OPENROUTER_DATA_COLLECTION must be 'allow' or 'deny'.")
+    preferences: Dict[str, Any] = {"data_collection": data_collection}
+    if structured:
+        preferences["require_parameters"] = True
+    return {"provider": preferences}
+
+
+def _provider_chat_kwargs(request_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Adapt provider-neutral chat kwargs for the active synchronous provider."""
+    provider = llm_provider()
+    adapted = dict(request_kwargs)
+    adapted["model"] = provider_model_id(request_kwargs["model"], provider)
+    if provider == "openrouter":
+        response_format = request_kwargs.get("response_format") or {}
+        adapted["extra_body"] = _openrouter_extra_body(
+            structured=response_format.get("type") == "json_schema"
+        )
+        # OpenRouter translates reasoning.effort into each vendor's own
+        # parameter; the top-level reasoning_effort is OpenAI-specific.
+        effort = adapted.pop("reasoning_effort", None)
+        if effort is not None:
+            adapted["extra_body"]["reasoning"] = {"effort": effort}
+    return adapted
+
+
 _ENCODER_CACHE: Dict[str, Any] = {}
 
 
 def _encoding_for_model(model: str):
     if not TIKTOKEN_AVAILABLE:
         return None
+    model, _ = split_model_spec(model)
     encoding = _ENCODER_CACHE.get(model)
     if encoding is not None:
         return encoding
@@ -837,6 +1252,8 @@ def atomize_review_record(record: Dict[str, Any], match_info: Dict[str, Any] | N
 def load_review_corpus(
     archive_root: str | Path = DEFAULT_REVIEW_ARCHIVE_PATH,
     include_low_confidence: bool = False,
+    *,
+    private_root: str | Path | None = None,
 ) -> Dict[str, Any]:
     """Load a legacy archive directory or a validated private manifest/snapshot."""
     root = Path(archive_root).expanduser()
@@ -857,7 +1274,7 @@ def load_review_corpus(
             raise ManifestValidationError(
                 "review-corpus JSON is neither a manifest v1 nor a normalized private snapshot"
             )
-        corpus = build_review_corpus_from_manifest(root)
+        corpus = build_review_corpus_from_manifest(root, private_root=private_root)
         if manifest_input:
             for issue in corpus.get("issues", []):
                 text = issue.get("issue_text", "")
@@ -3262,6 +3679,7 @@ def _generated_issues_for_eval(
 REVIEW_PRIOR_EVAL_MODES = ("baseline", "safe_prior", "local_raw_memory")
 REVIEW_BASELINE_TOP_K = 5
 REVIEW_BASELINE_EXPECTED_CASES = 5
+REVIEW_BASELINE_TOP_K_POLICY = "up_to_k_missing_slots_count_as_misses"
 
 
 def _require_positive_finite_cost_ceiling(
@@ -3557,6 +3975,8 @@ def prepare_review_adjudication(
 def _load_current_gold_adjudication(
     corpus: Dict[str, Any],
     adjudication_path: str | Path,
+    *,
+    private_root: str | Path | None = None,
 ) -> Dict[str, Any]:
     from review_adjudication import cluster_normalized_issues, load_gold_adjudication
 
@@ -3569,7 +3989,22 @@ def _load_current_gold_adjudication(
         adjudication_path,
         clusters=clusters,
         binding_context=_adjudication_binding_context(corpus),
+        private_root=private_root,
     )
+
+
+def _gold_adjudication_for_evaluation(
+    gold_validation: Dict[str, Any],
+    gold_mode: str,
+) -> Dict[str, Any]:
+    """Return the strict gold packet or a hash-bound completed-row projection."""
+    if gold_mode == "complete":
+        return gold_validation
+    if gold_mode == "partial":
+        from review_adjudication import project_partial_gold_adjudication
+
+        return project_partial_gold_adjudication(gold_validation)
+    raise ValueError("gold_mode must be one of: complete, partial")
 
 
 def finalize_review_evaluation(
@@ -3578,12 +4013,19 @@ def finalize_review_evaluation(
     generated_adjudication_path: str | Path,
     local_audit_path: str | Path,
     output_path: str | Path | None = None,
+    gold_mode: str = "complete",
 ) -> Dict[str, Any]:
     """Validate both manual packets and compute text-free aggregate metrics."""
     corpus = load_review_corpus(corpus_path)
     if not corpus.get("manifest_version"):
         raise ValueError("Final baseline metrics require a manifest corpus")
-    gold = _load_current_gold_adjudication(corpus, gold_adjudication_path)
+    raw_gold = _load_current_gold_adjudication(corpus, gold_adjudication_path)
+    gold = _gold_adjudication_for_evaluation(raw_gold, gold_mode)
+    if gold.get("status") != "ready":
+        raise ValueError(
+            "Gold adjudication is not ready for finalization "
+            f"(status={gold.get('status', 'missing')})"
+        )
     audit_path = Path(local_audit_path).expanduser()
     local_audit = json.loads(audit_path.read_text(encoding="utf-8"))
     audit_errors = _manifest_baseline_audit_errors(corpus, local_audit)
@@ -3592,14 +4034,23 @@ def finalize_review_evaluation(
             "Baseline run is incomplete or stale: " + "; ".join(audit_errors)
         )
     run_metadata = local_audit.get("run_metadata", {})
-    run_context = {
-        "corpus_binding_hash": _corpus_binding_hash(corpus),
-        "git_commit": run_metadata.get("git", {}).get("commit", "unknown"),
-        "routing": run_metadata.get("routing", {}),
-        "top_k": run_metadata.get("top_k", 5),
-        "memory_mode": run_metadata.get("memory_mode", "none"),
-        "benchmark_binding": run_metadata.get("benchmark_binding", {}),
-    }
+    recorded_gold_mode = str(run_metadata.get("gold_mode", "complete"))
+    if recorded_gold_mode != gold_mode:
+        raise ValueError(
+            "Baseline gold mode does not match finalization request "
+            f"(run={recorded_gold_mode}, requested={gold_mode})"
+        )
+    recorded_gold_binding = str(run_metadata.get("gold_binding_hash", ""))
+    if recorded_gold_binding and recorded_gold_binding != gold.get("binding_hash"):
+        raise ValueError(
+            "Gold adjudication changed after the baseline run; regenerate the "
+            "generated-adjudication packet."
+        )
+    run_context = _review_eval_generated_binding_context(
+        corpus,
+        run_metadata,
+        gold_mode=gold_mode,
+    )
     from review_adjudication import (
         compute_privacy_safe_metrics,
         load_generated_adjudication,
@@ -3611,13 +4062,20 @@ def finalize_review_evaluation(
             "binding_hash"
         ),
         expected_gold_binding_hash=gold.get("binding_hash"),
-        valid_gold_cluster_ids=[row.get("cluster_id", "") for row in gold.get("rows", [])],
+        valid_gold_cluster_ids=[
+            row.get("cluster_id", "") for row in gold.get("rows", [])
+        ],
+        gold_cluster_families={
+            str(row.get("cluster_id", "")): str(row.get("family_id", ""))
+            for row in gold.get("rows", [])
+            if row.get("cluster_id")
+        },
         run_binding_context=run_context,
         top_k=REVIEW_BASELINE_TOP_K,
     )
     if generated.get("status") != "ready":
         raise ValueError(
-            "Generated top-five adjudication is not complete and current "
+            "Generated up-to-five adjudication is not complete and current "
             f"(status={generated.get('status', 'missing')})"
         )
     expected_case_keys = {
@@ -3632,11 +4090,12 @@ def finalize_review_evaluation(
         for row in generated.get("rows", [])
     )
     if set(generated_counts) != expected_case_keys or any(
-        count != REVIEW_BASELINE_TOP_K for count in generated_counts.values()
+        not 1 <= count <= REVIEW_BASELINE_TOP_K
+        for count in generated_counts.values()
     ):
         raise ValueError(
-            "Generated adjudication must contain exactly five rows for each of "
-            "the five expected cases"
+            "Generated adjudication must contain between one and five rows for "
+            "each of the five expected cases"
         )
     family_metadata: Dict[str, Dict[str, Any]] = {}
     cost_by_family: Dict[str, float] = {}
@@ -3644,9 +4103,14 @@ def finalize_review_evaluation(
         family_id = str(split.get("family_id", ""))
         if not family_id:
             continue
+        existing_family = family_metadata.get(family_id, {})
         family_metadata[family_id] = {
             "benchmark_tier": split.get("benchmark_tier", "primary"),
-            "is_journal_case": _split_is_journal_case(split),
+            "is_journal_case": bool(
+                existing_family.get("is_journal_case")
+                or _split_is_journal_case(split)
+            ),
+            "case_count": int(existing_family.get("case_count", 0)) + 1,
         }
         usage_cost = split.get("actual_usage", {}).get("total_cost_usd")
         cost_by_family[family_id] = float(
@@ -3660,12 +4124,24 @@ def finalize_review_evaluation(
         family_metadata=family_metadata,
         cost_by_family=cost_by_family,
         top_k=REVIEW_BASELINE_TOP_K,
+        output_cardinality_mode=(
+            "up_to_k"
+            if run_metadata.get("top_k_policy") == REVIEW_BASELINE_TOP_K_POLICY
+            else "exact_k"
+        ),
     )
-    if metrics.get("status") != "complete":
+    expected_metric_status = (
+        "partial_gold_pilot" if gold_mode == "partial" else "complete"
+    )
+    if metrics.get("status") != expected_metric_status:
         raise ValueError("Final metrics remain pending human adjudication")
     result = {
-        "status": "complete",
-        "schema_version": "portable_review_eval_metrics_v1",
+        "status": expected_metric_status,
+        "schema_version": (
+            "portable_review_eval_partial_metrics_v1"
+            if gold_mode == "partial"
+            else "portable_review_eval_metrics_v1"
+        ),
         "corpus_binding_hash": _corpus_binding_hash(corpus),
         "run_metadata": run_metadata,
         "metrics": metrics,
@@ -3728,8 +4204,12 @@ def _review_eval_run_metadata(
     top_k: int,
     memory_mode: str,
     splits: List[Dict[str, Any]] | None = None,
+    gold_mode: str = "complete",
+    gold_validation: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     routing_models = dict(routing.__dict__)
+    generation_panel = list(routing_models.pop("generation_panel", ()))
+    critiques_per_reviewer = routing_models.pop("critiques_per_reviewer", 1)
     role_counts = Counter(role for role, _ in BASE_PERSONA_DECK)
     multiplier = num_agents // len(BASE_PERSONA_DECK) if BASE_PERSONA_DECK else 0
     metadata = {
@@ -3737,25 +4217,66 @@ def _review_eval_run_metadata(
         "git": _git_run_state(),
         "routing": routing_models,
         "reasoning_effort": {
-            stage: MODEL_REASONING_EFFORT.get(model, "model_default")
+            stage: model_reasoning_effort(model) or "model_default"
             for stage, model in routing_models.items()
         },
+        "generation_panel": generation_panel,
+        "generation_panel_reasoning_effort": {
+            member: model_reasoning_effort(member) or "model_default"
+            for member in generation_panel
+        },
+        "critiques_per_reviewer": critiques_per_reviewer,
         "num_agents": num_agents,
         "reviewer_roles": {
             role: count * multiplier for role, count in sorted(role_counts.items())
         },
         "top_k": top_k,
+        "top_k_policy": REVIEW_BASELINE_TOP_K_POLICY,
         "importance_threshold": IMPORTANCE_THRESHOLD,
         "composite_threshold": COMPOSITE_THRESHOLD,
         "memory_mode": memory_mode,
+        "gold_mode": gold_mode,
         "corpus_binding_hash": _corpus_binding_hash(corpus),
     }
+    if gold_validation is not None:
+        metadata["gold_binding_hash"] = gold_validation.get("binding_hash", "")
+        metadata["gold_evaluation_scope"] = gold_validation.get(
+            "evaluation_scope", "complete_gold_benchmark"
+        )
+        if gold_validation.get("coverage"):
+            metadata["gold_coverage"] = dict(gold_validation["coverage"])
     if corpus.get("manifest_version"):
         metadata["benchmark_binding"] = _manifest_benchmark_binding(
             corpus,
             splits or [],
         )
     return metadata
+
+
+def _review_eval_generated_binding_context(
+    corpus: Dict[str, Any],
+    run_metadata: Mapping[str, Any],
+    gold_mode: str | None = None,
+) -> Dict[str, Any]:
+    """Build the exact context hashed into generated-adjudication packets."""
+    return {
+        "corpus_binding_hash": _corpus_binding_hash(corpus),
+        "git_commit": run_metadata.get("git", {}).get("commit", "unknown"),
+        "routing": run_metadata.get("routing", {}),
+        "num_agents": run_metadata.get("num_agents", 0),
+        "reviewer_roles": run_metadata.get("reviewer_roles", {}),
+        "top_k": run_metadata.get("top_k", REVIEW_BASELINE_TOP_K),
+        "top_k_policy": run_metadata.get(
+            "top_k_policy", REVIEW_BASELINE_TOP_K_POLICY
+        ),
+        "memory_mode": run_metadata.get("memory_mode", "none"),
+        "gold_mode": (
+            gold_mode
+            if gold_mode is not None
+            else run_metadata.get("gold_mode", "complete")
+        ),
+        "benchmark_binding": run_metadata.get("benchmark_binding", {}),
+    }
 
 
 def _manifest_baseline_audit_errors(
@@ -3777,6 +4298,12 @@ def _manifest_baseline_audit_errors(
         errors.append("local audit corpus binding does not match the current corpus")
     if int(run_metadata.get("top_k", 0) or 0) != REVIEW_BASELINE_TOP_K:
         errors.append("manifest baseline must use top_k=5")
+    if int(run_metadata.get("num_agents", 0) or 0) != len(BASE_PERSONA_DECK):
+        errors.append("manifest baseline must use the frozen eight-reviewer design")
+    if run_metadata.get("top_k_policy") != REVIEW_BASELINE_TOP_K_POLICY:
+        errors.append(
+            "manifest baseline top-k policy does not match the current benchmark"
+        )
     if run_metadata.get("memory_mode") != "none":
         errors.append("manifest baseline must use memory_mode=none")
     if current_binding["expected_case_count"] != REVIEW_BASELINE_EXPECTED_CASES:
@@ -3819,8 +4346,11 @@ def _manifest_baseline_audit_errors(
             errors.append(f"case {key!r} was not API-evaluated successfully")
         if split.get("paper_text_status") != "ok":
             errors.append(f"case {key!r} did not have extractable manuscript text")
-        if int(split.get("generated_issue_count", 0) or 0) != REVIEW_BASELINE_TOP_K:
-            errors.append(f"case {key!r} does not contain exactly five generated issues")
+        generated_count = int(split.get("generated_issue_count", 0) or 0)
+        if not 1 <= generated_count <= REVIEW_BASELINE_TOP_K:
+            errors.append(
+                f"case {key!r} must contain between one and five generated issues"
+            )
     if len(split_keys) != len(set(split_keys)):
         errors.append("local audit contains duplicate case rows")
     if set(split_keys) != expected_keys:
@@ -3970,6 +4500,7 @@ async def run_historical_review_eval(
     memory_mode: str = "none",
     max_cost_usd: float | None = None,
     adjudication_path: str | Path | None = None,
+    gold_mode: str = "complete",
 ) -> Dict[str, Any]:
     """Plan or run whole-paper historical-review evaluation.
 
@@ -3979,6 +4510,8 @@ async def run_historical_review_eval(
     """
     if memory_mode not in {"none", "local_raw"}:
         raise ValueError("memory_mode must be one of: none, local_raw")
+    if gold_mode not in {"complete", "partial"}:
+        raise ValueError("gold_mode must be one of: complete, partial")
     if max_cost_usd is not None:
         max_cost_usd = _require_positive_finite_cost_ceiling(
             max_cost_usd,
@@ -4002,6 +4535,7 @@ async def run_historical_review_eval(
             routing=routing,
             memory_mode=memory_mode,
             adjudication_path=adjudication_path,
+            gold_mode=gold_mode,
         )
         preflight_cost = float(
             preflight.get("summary", {}).get("total_estimated_cost_usd", 0.0)
@@ -4014,6 +4548,10 @@ async def run_historical_review_eval(
 
     routing = routing or build_model_routing(gen_model=gen_model)
     corpus = load_review_corpus(archive_root, include_low_confidence=include_low_confidence)
+    if gold_mode == "partial" and not corpus.get("manifest_version"):
+        raise ValueError("Partial-gold evaluation requires a private manifest corpus")
+    if corpus.get("manifest_version") and num_agents != len(BASE_PERSONA_DECK):
+        raise ValueError("Manifest baseline evaluation requires exactly eight reviewers")
     if corpus.get("manifest_version") and top_k != REVIEW_BASELINE_TOP_K:
         raise ValueError("Manifest baseline evaluation requires top_k=5")
     if run_api and corpus.get("manifest_version"):
@@ -4022,9 +4560,17 @@ async def run_historical_review_eval(
             raise ValueError(
                 "Paid manifest evaluation requires a clean, committed feedback_llm worktree"
             )
+    raw_gold_validation: Dict[str, Any] | None = None
     gold_validation: Dict[str, Any] | None = None
     if corpus.get("manifest_version") and adjudication_path:
-        gold_validation = _load_current_gold_adjudication(corpus, adjudication_path)
+        raw_gold_validation = _load_current_gold_adjudication(corpus, adjudication_path)
+        gold_validation = _gold_adjudication_for_evaluation(
+            raw_gold_validation, gold_mode
+        )
+    if corpus.get("manifest_version") and gold_mode == "partial" and not adjudication_path:
+        raise ValueError(
+            "Partial-gold evaluation requires --eval-adjudication, including in dry-run mode"
+        )
     if run_api and corpus.get("manifest_version"):
         if not adjudication_path:
             raise ValueError(
@@ -4050,6 +4596,25 @@ async def run_historical_review_eval(
                 "Paid manifest baseline is not the complete fixed pilot: "
                 + "; ".join(pilot_errors)
             )
+    run_metadata = _review_eval_run_metadata(
+        corpus,
+        routing=routing,
+        num_agents=num_agents,
+        top_k=top_k,
+        memory_mode=memory_mode,
+        splits=splits,
+        gold_mode=gold_mode,
+        gold_validation=gold_validation,
+    )
+    adjudication_dir: Path | None = None
+    run_binding_context: Dict[str, Any] | None = None
+    if run_api and corpus.get("manifest_version"):
+        adjudication_dir = Path(str(adjudication_path)).expanduser().resolve().parent
+        run_binding_context = _review_eval_generated_binding_context(
+            corpus,
+            run_metadata,
+            gold_mode=gold_mode,
+        )
     issues_by_paper: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for issue in corpus.get("issues", []):
         issue_key = issue.get("case_id") or issue.get("paper_id", "")
@@ -4149,7 +4714,6 @@ async def run_historical_review_eval(
                 review_prior=None,
             )
             generated = _generated_issues_for_eval(pipeline_result, top_k=top_k)
-            human_issues = issues_by_paper.get(case_id, issues_by_paper.get(paper_id, []))
             for rank, issue in enumerate(generated, start=1):
                 adjudication_issue = dict(issue)
                 adjudication_issue.update(
@@ -4172,11 +4736,15 @@ async def run_historical_review_eval(
                 }
                 for issue in generated
             ]
-            item["metrics"] = compare_generated_to_human_issues(
-                generated,
-                human_issues,
-                top_k=top_k,
-            )
+            if not corpus.get("manifest_version"):
+                human_issues = issues_by_paper.get(
+                    case_id, issues_by_paper.get(paper_id, [])
+                )
+                item["metrics"] = compare_generated_to_human_issues(
+                    generated,
+                    human_issues,
+                    top_k=top_k,
+                )
             item["actual_usage"] = pipeline_result.get("actual_usage", {})
             actual_case_cost = float(
                 item["actual_usage"].get("total_cost_usd", estimated_case_cost)
@@ -4190,6 +4758,21 @@ async def run_historical_review_eval(
                 if corpus.get("manifest_version")
                 else "api_evaluated"
             )
+            if (
+                run_binding_context is not None
+                and adjudication_dir is not None
+                and generated_for_adjudication
+            ):
+                from review_adjudication import write_generated_adjudication_packet
+
+                write_generated_adjudication_packet(
+                    generated_for_adjudication,
+                    gold_validation or {},
+                    adjudication_dir,
+                    run_binding_context=run_binding_context,
+                    top_k=REVIEW_BASELINE_TOP_K,
+                    prefix="generated_adjudication.in_progress",
+                )
         elif run_api:
             item["status"] = "skipped_no_extractable_paper_text"
         elif paper_text.strip():
@@ -4197,7 +4780,14 @@ async def run_historical_review_eval(
 
         split_results.append(item)
 
-    evaluated = [item for item in split_results if item.get("metrics")]
+    evaluated_with_legacy_metrics = [
+        item for item in split_results if item.get("metrics")
+    ]
+    api_evaluated = [
+        item
+        for item in split_results
+        if item.get("status") in {"api_evaluated", "pending_human_adjudication"}
+    ]
     if corpus.get("manifest_version"):
         corpus_target_issues = _manifest_evaluation_issues(corpus)
         corpus_excluded_targets = [
@@ -4213,9 +4803,16 @@ async def run_historical_review_eval(
         "archive_root": str(archive_root),
         "mode": "api" if run_api else "dry_run",
         "memory_mode": memory_mode,
+        "gold_mode": gold_mode,
+        "top_k_policy": REVIEW_BASELINE_TOP_K_POLICY,
+        "evaluation_scope": (
+            gold_validation.get("evaluation_scope", "complete_gold_benchmark")
+            if gold_validation is not None
+            else "not_loaded"
+        ),
         "max_cost_usd": max_cost_usd,
         "splits": len(split_results),
-        "api_evaluated_splits": len(evaluated),
+        "api_evaluated_splits": len(api_evaluated),
         "extractable_splits": sum(1 for item in split_results if item.get("paper_text_status") == "ok"),
         "total_estimated_cost_usd": round(total_estimated_cost, 6),
         "total_actual_cost_usd": round(actual_spend_usd, 6),
@@ -4226,36 +4823,63 @@ async def run_historical_review_eval(
         "corpus_issue_target_exclusion_reasons": _target_exclusion_reason_counts(corpus_excluded_targets),
         "low_confidence_records_excluded": corpus["stats"]["excluded_low_confidence_records"],
     }
-    if evaluated:
+    if gold_validation and gold_validation.get("coverage"):
+        summary["gold_coverage"] = dict(gold_validation["coverage"])
+    if evaluated_with_legacy_metrics:
         summary["mean_human_issue_recall_at_k"] = round(
-            sum(item["metrics"]["human_issue_recall_at_k"] for item in evaluated) / len(evaluated),
+            sum(
+                item["metrics"]["human_issue_recall_at_k"]
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
         summary["mean_major_issue_recall_at_k"] = round(
-            sum(item["metrics"]["major_issue_recall_at_k"] for item in evaluated) / len(evaluated),
+            sum(
+                item["metrics"]["major_issue_recall_at_k"]
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
         summary["mean_human_issue_cluster_recall_at_k"] = round(
-            sum(item["metrics"]["human_issue_cluster_recall_at_k"] for item in evaluated) / len(evaluated),
+            sum(
+                item["metrics"]["human_issue_cluster_recall_at_k"]
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
         summary["mean_major_issue_cluster_recall_at_k"] = round(
-            sum(item["metrics"]["major_issue_cluster_recall_at_k"] for item in evaluated) / len(evaluated),
+            sum(
+                item["metrics"]["major_issue_cluster_recall_at_k"]
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
         summary["mean_reviewer_likelihood_precision_at_k"] = round(
-            sum(item["metrics"]["reviewer_likelihood_precision_at_k"] for item in evaluated) / len(evaluated),
+            sum(
+                item["metrics"]["reviewer_likelihood_precision_at_k"]
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
         summary["mean_deduplicated_reviewer_likelihood_precision_at_k"] = round(
             sum(
                 item["metrics"]["deduplicated_reviewer_likelihood_precision_at_k"]
-                for item in evaluated
-            ) / len(evaluated),
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
         summary["mean_duplicate_generated_cluster_matches"] = round(
-            sum(item["metrics"]["duplicate_generated_cluster_matches"] for item in evaluated) / len(evaluated),
+            sum(
+                item["metrics"]["duplicate_generated_cluster_matches"]
+                for item in evaluated_with_legacy_metrics
+            )
+            / len(evaluated_with_legacy_metrics),
             4,
         )
 
@@ -4267,30 +4891,68 @@ async def run_historical_review_eval(
         ),
         "summary": summary,
         "splits": split_results,
-        "run_metadata": _review_eval_run_metadata(
-            corpus,
-            routing=routing,
-            num_agents=num_agents,
-            top_k=top_k,
-            memory_mode=memory_mode,
-            splits=splits,
-        ),
+        "run_metadata": run_metadata,
     }
     if gold_validation is not None:
         result["gold_adjudication"] = {
             "status": gold_validation.get("status"),
+            "source_status": (raw_gold_validation or {}).get("status"),
+            "gold_mode": gold_mode,
+            "evaluation_scope": gold_validation.get("evaluation_scope"),
             "binding_hash": gold_validation.get("binding_hash", ""),
             "pending_fields": len(gold_validation.get("pending_fields", [])),
+            "coverage": dict(gold_validation.get("coverage", {})),
         }
     if run_api and corpus.get("manifest_version"):
-        from review_adjudication import write_generated_adjudication_packet
+        from review_adjudication import (
+            generated_binding_hash,
+            select_generated_top_k,
+            write_generated_adjudication_packet,
+        )
 
-        adjudication_dir = Path(str(adjudication_path)).expanduser().resolve().parent
+        if adjudication_dir is None or run_binding_context is None:
+            raise RuntimeError("Paid manifest checkpoint context was not initialized")
+        if generated_for_adjudication:
+            checkpoint_issues = select_generated_top_k(
+                generated_for_adjudication,
+                top_k=REVIEW_BASELINE_TOP_K,
+            )
+            checkpoint_binding = generated_binding_hash(
+                checkpoint_issues,
+                (gold_validation or {}).get("binding_hash", ""),
+                run_binding_context,
+                REVIEW_BASELINE_TOP_K,
+            )
+            checkpoint_packet = write_generated_adjudication_packet(
+                checkpoint_issues,
+                gold_validation or {},
+                adjudication_dir,
+                run_binding_context=run_binding_context,
+                top_k=REVIEW_BASELINE_TOP_K,
+                prefix=(
+                    "generated_adjudication.checkpoint."
+                    f"{checkpoint_binding[:16]}"
+                ),
+            )
+            if checkpoint_packet.get("binding_hash") != checkpoint_binding:
+                raise RuntimeError("Generated checkpoint binding is inconsistent")
+            result["generated_checkpoint"] = {
+                "binding_hash": checkpoint_packet.get("binding_hash"),
+                "issue_count": checkpoint_packet.get("row_count", 0),
+                "csv_path": checkpoint_packet.get("csv_path"),
+                "markdown_path": checkpoint_packet.get("markdown_path"),
+            }
+        else:
+            result["generated_checkpoint"] = {
+                "status": "not_created_no_generated_issues",
+                "issue_count": 0,
+            }
         audit_errors = _manifest_baseline_audit_errors(corpus, result)
         if audit_errors:
             result["status"] = "incomplete_run"
             result["generated_adjudication"] = {
                 "status": "not_created_incomplete_run",
+                "checkpoint_only": bool(generated_for_adjudication),
                 "errors": audit_errors,
             }
         else:
@@ -4298,16 +4960,7 @@ async def run_historical_review_eval(
                 generated_for_adjudication,
                 gold_validation or {},
                 adjudication_dir,
-                run_binding_context={
-                    "corpus_binding_hash": _corpus_binding_hash(corpus),
-                    "git_commit": result["run_metadata"]["git"]["commit"],
-                    "routing": result["run_metadata"]["routing"],
-                    "top_k": REVIEW_BASELINE_TOP_K,
-                    "memory_mode": memory_mode,
-                    "benchmark_binding": result["run_metadata"].get(
-                        "benchmark_binding", {}
-                    ),
-                },
+                run_binding_context=run_binding_context,
                 top_k=REVIEW_BASELINE_TOP_K,
             )
             result["generated_adjudication"] = {
@@ -4683,6 +5336,9 @@ def render_historical_review_eval_summary(result: Dict[str, Any]) -> str:
         "",
         f"- Mode: {summary.get('mode', 'dry_run')}",
         f"- Review-memory mode: {summary.get('memory_mode', 'local_raw')}",
+        f"- Gold mode: {summary.get('gold_mode', 'complete')}",
+        f"- Output cardinality: {summary.get('top_k_policy', 'exact_k')}",
+        f"- Evaluation scope: {summary.get('evaluation_scope', 'not_loaded')}",
         f"- Corpus records: {summary.get('corpus_records', 0)}",
         f"- Corpus issue candidates: {summary.get('corpus_issue_candidates', 0)}",
         f"- Corpus scored issue targets: {summary.get('corpus_issue_targets', 0)}",
@@ -4693,11 +5349,25 @@ def render_historical_review_eval_summary(result: Dict[str, Any]) -> str:
         f"- API-evaluated splits: {summary.get('api_evaluated_splits', 0)}",
         f"- Estimated total API cost: ${summary.get('total_estimated_cost_usd', 0.0):.4f}",
     ]
+    coverage = summary.get("gold_coverage", {})
+    if coverage:
+        lines.extend(
+            [
+                "- Gold rows completed: "
+                f"{coverage.get('adjudicated_cluster_count', 0)}/"
+                f"{coverage.get('total_cluster_count', 0)}",
+                "- Fully adjudicated scoring clusters: "
+                f"{coverage.get('eligible_scoring_cluster_count', 0)}",
+                "- Exhaustive major recall available: no"
+                if summary.get("gold_mode") == "partial"
+                else "- Exhaustive major recall available: yes",
+            ]
+        )
     if summary.get("mode") == "api":
         lines.append(
             f"- Actual API cost recorded: ${summary.get('total_actual_cost_usd', 0.0):.4f}"
         )
-    if summary.get("api_evaluated_splits"):
+    if "mean_human_issue_recall_at_k" in summary:
         lines.extend(
             [
                 f"- Mean human issue recall@K: {summary.get('mean_human_issue_recall_at_k', 0.0):.4f}",
@@ -6091,6 +6761,29 @@ GENERATION_SYSTEM_PROMPT = (
 )
 
 
+FEEDBACK_PROPOSAL_LIST_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "proposals": {"type": "array", "items": FEEDBACK_PROPOSAL_SCHEMA},
+    },
+    "required": ["proposals"],
+    "additionalProperties": False,
+}
+
+
+def _multiple_critiques_instruction(max_critiques: int) -> str:
+    return f"""
+Output format for this request (this replaces the single-object instruction above):
+Return a JSON object with one field "proposals": a list of 1 to {max_critiques} critiques, each an object with
+exactly the fields listed above. Put your most important critique first.
+Add a further critique only if all of the following hold:
+- it is a different problem from your earlier critiques, not a restatement or a sub-point of one;
+- it cites different evidence IDs or affects a different claim;
+- you would raise it in a referee report on its own, at severity 3 or higher.
+One well-supported critique is better than a list padded with weaker ones. Returning a single critique is normal.
+""".rstrip()
+
+
 def _generation_messages(
     persona_prompt: str,
     paper_text: str,
@@ -6098,22 +6791,23 @@ def _generation_messages(
     evidence_map: Dict[str, Any] | None = None,
     review_memory_context: str = "",
     review_prior_gap_context: str = "",
+    max_critiques: int = 1,
 ) -> List[Dict[str, str]]:
     system_prompt = GENERATION_SYSTEM_PROMPT
     if persona_prompt:
         system_prompt = system_prompt + "\n\n" + persona_prompt
+    user_prompt = _generation_user_prompt(
+        paper_text,
+        worker_id,
+        evidence_map=evidence_map,
+        review_memory_context=review_memory_context,
+        review_prior_gap_context=review_prior_gap_context,
+    )
+    if max_critiques > 1:
+        user_prompt = user_prompt + "\n" + _multiple_critiques_instruction(max_critiques)
     return [
         {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": _generation_user_prompt(
-                paper_text,
-                worker_id,
-                evidence_map=evidence_map,
-                review_memory_context=review_memory_context,
-                review_prior_gap_context=review_prior_gap_context,
-            ),
-        },
+        {"role": "user", "content": user_prompt},
     ]
 
 
@@ -6862,15 +7556,48 @@ Low-risk issues are still worth fixing because reviewers may ask for them, but t
 
 
 client: AsyncOpenAI | None = None
+_CLIENT_PROVIDER: str | None = None
+_openai_direct_client: AsyncOpenAI | None = None
 
 
 def get_client() -> AsyncOpenAI:
-    """Lazily create the OpenAI client so imports and unit tests do not need a key."""
-    global client
-    if client is None:
-        ensure_api_key()
-        client = AsyncOpenAI()
+    """Lazily create the client for the active provider.
+
+    Imports and unit tests do not need a key. OpenRouter is reached through
+    the OpenAI SDK with a different base URL.
+    """
+    global client, _CLIENT_PROVIDER
+    provider = llm_provider()
+    if client is None or _CLIENT_PROVIDER not in (None, provider):
+        ensure_api_key(provider)
+        if provider == "openrouter":
+            client = AsyncOpenAI(
+                base_url=OPENROUTER_BASE_URL,
+                api_key=_openrouter_api_key(),
+            )
+        else:
+            client = AsyncOpenAI()
+        _CLIENT_PROVIDER = provider
     return client
+
+
+def get_openai_direct_client() -> AsyncOpenAI:
+    """Client for the OpenAI Batch API, which OpenRouter does not offer."""
+    global _openai_direct_client
+    if llm_provider() == "openai":
+        return get_client()
+    if _openai_direct_client is None:
+        ensure_api_key("openai")
+        _openai_direct_client = AsyncOpenAI()
+    return _openai_direct_client
+
+
+def _require_batch_model(model: str) -> None:
+    if not is_openai_model(model):
+        raise ValueError(
+            f"Model '{model}' cannot run in Batch API mode, which calls OpenAI "
+            "directly. Use an OpenAI model or drop the batch option."
+        )
 
 
 def _plain_openai_object(value: Any) -> Any:
@@ -6996,10 +7723,10 @@ class OpenAIBatchChatClient:
 
         try:
             with input_path.open("rb") as handle:
-                input_file = await get_client().files.create(file=handle, purpose="batch")
+                input_file = await get_openai_direct_client().files.create(file=handle, purpose="batch")
             submission["input_file_id"] = input_file.id
             submission["status"] = "submitted"
-            batch = await get_client().batches.create(
+            batch = await get_openai_direct_client().batches.create(
                 input_file_id=input_file.id,
                 endpoint="/v1/chat/completions",
                 completion_window="24h",
@@ -7020,7 +7747,7 @@ class OpenAIBatchChatClient:
             submission["error_file_id"] = batch.error_file_id
             if not batch.output_file_id:
                 raise RuntimeError(f"Batch {batch.id} completed without an output file")
-            content = await get_client().files.content(batch.output_file_id)
+            content = await get_openai_direct_client().files.content(batch.output_file_id)
             raw = await content.aread()
             output_text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
             output_path.write_text(output_text, encoding="utf-8")
@@ -7044,7 +7771,7 @@ class OpenAIBatchChatClient:
             else None
         )
         while True:
-            batch = await get_client().batches.retrieve(batch_id)
+            batch = await get_openai_direct_client().batches.retrieve(batch_id)
             submission["status"] = batch.status
             submission["request_counts"] = _plain_openai_object(getattr(batch, "request_counts", None))
             submission["last_polled_at"] = int(time.time())
@@ -7127,7 +7854,7 @@ class UsageTracker:
     """Accumulates actual token usage from OpenAI API responses."""
 
     def __init__(self):
-        self.stages: Dict[str, Dict[str, int]] = {}
+        self.stages: Dict[str, Dict[str, Any]] = {}
         self._current_stage = "unknown"
 
     def set_stage(self, stage: str):
@@ -7135,10 +7862,29 @@ class UsageTracker:
         if stage not in self.stages:
             self.stages[stage] = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0}
 
-    def record(self, usage):
-        """Record usage from an OpenAI API response's usage object."""
+    def record(self, usage, model: str | None = None):
+        """Record usage from an API response's usage object.
+
+        When ``model`` is given, usage is also kept per model within the stage,
+        so a stage that mixes models can be priced correctly.
+        """
         if usage is None:
             return
+        if model is not None:
+            stage_entry = self.stages.setdefault(
+                self._current_stage,
+                {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0},
+            )
+            per_model = stage_entry.setdefault("by_model", {}).setdefault(
+                model,
+                {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0},
+            )
+            per_model["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+            per_model["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+            per_model["requests"] += 1
+            model_details = getattr(usage, "prompt_tokens_details", None)
+            if model_details:
+                per_model["cached_tokens"] += getattr(model_details, "cached_tokens", 0) or 0
         stage = self.stages.setdefault(
             self._current_stage,
             {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "requests": 0},
@@ -7149,6 +7895,15 @@ class UsageTracker:
         details = getattr(usage, "prompt_tokens_details", None)
         if details:
             stage["cached_tokens"] += getattr(details, "cached_tokens", 0) or 0
+        self._record_reported_cost(stage, usage)
+
+    @staticmethod
+    def _record_reported_cost(stage: Dict[str, Any], usage) -> None:
+        """Keep the dollar cost the provider reports (OpenRouter's usage.cost)."""
+        cost = getattr(usage, "cost", None)
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            stage["reported_cost_usd"] = stage.get("reported_cost_usd", 0.0) + float(cost)
+            stage["reported_cost_requests"] = stage.get("reported_cost_requests", 0) + 1
 
     def record_embedding(self, usage):
         """Record usage from an embedding API response."""
@@ -7160,6 +7915,7 @@ class UsageTracker:
         )
         stage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
         stage["requests"] += 1
+        self._record_reported_cost(stage, usage)
 
 
 # Thresholds for meta-review inclusion (tune as needed)
@@ -7405,13 +8161,14 @@ def _chat_request_kwargs(
     response_format: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Build Chat Completions kwargs with tier-aware reasoning defaults."""
+    model_name, _ = split_model_spec(model)
     request_kwargs: Dict[str, Any] = {
-        "model": model,
+        "model": model_name,
         "messages": messages,
     }
     if response_format is not None:
         request_kwargs["response_format"] = response_format
-    reasoning_effort = MODEL_REASONING_EFFORT.get(model)
+    reasoning_effort = model_reasoning_effort(model)
     if reasoning_effort is not None:
         request_kwargs["reasoning_effort"] = reasoning_effort
     return request_kwargs
@@ -7436,12 +8193,14 @@ async def chat_json(
         response_format=response_format,
     )
     if _ACTIVE_BATCH_CHAT_CLIENT is not None:
+        _require_batch_model(model)
         body = await _ACTIVE_BATCH_CHAT_CLIENT.chat_completion(request_kwargs)
         if tracker:
-            tracker.record(_namespace_from_mapping(body.get("usage")))
+            tracker.record(_namespace_from_mapping(body.get("usage")), model=model)
         content = body["choices"][0]["message"]["content"]
         return json.loads(content)
 
+    request_kwargs = _provider_chat_kwargs(request_kwargs)
     limit = _chat_json_concurrency_limit()
     if limit:
         async with _chat_json_semaphore(limit):
@@ -7449,7 +8208,7 @@ async def chat_json(
     else:
         resp = await get_client().chat.completions.create(**request_kwargs)
     if tracker:
-        tracker.record(resp.usage)
+        tracker.record(resp.usage, model=model)
     content = resp.choices[0].message.content
     return json.loads(content)
 
@@ -7462,11 +8221,13 @@ async def chat_text(
     """Call the chat API and return plain text, honoring Batch API context."""
     request_kwargs = _chat_request_kwargs(messages, model)
     if _ACTIVE_BATCH_CHAT_CLIENT is not None:
+        _require_batch_model(model)
         body = await _ACTIVE_BATCH_CHAT_CLIENT.chat_completion(request_kwargs)
         if tracker:
-            tracker.record(_namespace_from_mapping(body.get("usage")))
+            tracker.record(_namespace_from_mapping(body.get("usage")), model=model)
         return body["choices"][0]["message"]["content"]
 
+    request_kwargs = _provider_chat_kwargs(request_kwargs)
     limit = _chat_json_concurrency_limit()
     if limit:
         async with _chat_json_semaphore(limit):
@@ -7474,7 +8235,7 @@ async def chat_text(
     else:
         resp = await get_client().chat.completions.create(**request_kwargs)
     if tracker:
-        tracker.record(resp.usage)
+        tracker.record(resp.usage, model=model)
     return resp.choices[0].message.content
 
 
@@ -7537,6 +8298,9 @@ async def generate_single_proposal(
     return result
 
 
+EXTRA_CRITIQUE_ID_STEP = 1000
+
+
 def _normalize_generated_proposal(
     result: Dict[str, Any],
     worker: Dict[str, Any],
@@ -7570,15 +8334,28 @@ async def generate_all_proposals(
     review_memory_context: str = "",
     review_prior_gap_context: str = "",
     tracker: "UsageTracker | None" = None,
+    worker_models: Sequence[str] | None = None,
+    max_critiques: int = 1,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Generate proposals with partial failure recovery.
+
+    Args:
+        worker_models: Optional model per worker (a mixed reviewer panel).
+            Defaults to ``model`` for every worker.
+        max_critiques: Upper limit of critiques per worker. With 1, each
+            worker returns a single proposal object.
 
     Returns:
         Tuple of (successful_proposals, failed_workers).
         Failed workers contain {"worker": worker_dict, "error": str}.
     """
+    if worker_models is not None and len(worker_models) != len(workers):
+        raise ValueError("worker_models must have one entry per worker.")
+    models = list(worker_models) if worker_models is not None else [model] * len(workers)
+    multiple = max_critiques > 1
+
     tasks = []
-    for assignment in workers:
+    for assignment, worker_model in zip(workers, models):
         messages = _generation_messages(
             assignment["persona"],
             paper_text,
@@ -7586,14 +8363,15 @@ async def generate_all_proposals(
             evidence_map=evidence_map,
             review_memory_context=review_memory_context,
             review_prior_gap_context=review_prior_gap_context,
+            max_critiques=max_critiques,
         )
         # Use retry wrapper for transient errors
         task = chat_json_with_retry(
             messages,
-            model=model,
+            model=worker_model,
             tracker=tracker,
-            schema=FEEDBACK_PROPOSAL_SCHEMA,
-            schema_name="feedback_proposal",
+            schema=FEEDBACK_PROPOSAL_LIST_SCHEMA if multiple else FEEDBACK_PROPOSAL_SCHEMA,
+            schema_name="feedback_proposal_list" if multiple else "feedback_proposal",
         )
         tasks.append(task)
 
@@ -7606,8 +8384,26 @@ async def generate_all_proposals(
         worker = workers[i]
         if isinstance(result, Exception):
             failed.append({"worker": worker, "error": str(result)})
-        else:
-            successful.append(_normalize_generated_proposal(result, worker))
+            continue
+        if not multiple:
+            proposal = _normalize_generated_proposal(result, worker)
+            proposal["generation_model"] = models[i]
+            successful.append(proposal)
+            continue
+        items = result.get("proposals") if isinstance(result, dict) else None
+        items = [item for item in (items or []) if isinstance(item, dict)][:max_critiques]
+        if not items:
+            failed.append({"worker": worker, "error": "Reviewer returned no critiques."})
+            continue
+        for rank, item in enumerate(items):
+            proposal = _normalize_generated_proposal(item, worker)
+            # The first critique keeps the reviewer's id; later ones get a
+            # distinct id so downstream stages can key on it.
+            proposal["id"] = worker["id"] + EXTRA_CRITIQUE_ID_STEP * rank
+            proposal["reviewer_id"] = worker["id"]
+            proposal["critique_rank"] = rank + 1
+            proposal["generation_model"] = models[i]
+            successful.append(proposal)
 
     return successful, failed
 
@@ -8286,7 +9082,7 @@ async def embed_texts(
     texts: List[str],
     tracker: "UsageTracker | None" = None,
 ) -> List[List[float]]:
-    """Embed a list of texts using OpenAI's embeddings API.
+    """Embed a list of texts through the active provider's embeddings API.
 
     Uses text-embedding-3-small (cheap, fast, good for similarity).
     Cost: ~$0.001 per run for 8-32 short texts.
@@ -8294,7 +9090,7 @@ async def embed_texts(
     if not texts:
         return []
     resp = await get_client().embeddings.create(
-        model=EMBEDDING_MODEL,
+        model=provider_model_id(EMBEDDING_MODEL),
         input=texts,
     )
     if tracker:
@@ -8715,6 +9511,7 @@ def estimate_cost_before_run(
             worker["id"],
             evidence_map=evidence_index,
             review_memory_context=cold_review_memory_context,
+            max_critiques=routing.critiques_per_reviewer,
         )
         gen_prompt_tokens += _count_message_tokens(messages, gen_model)
     if active_review_prior and prior_gap_count:
@@ -8743,7 +9540,8 @@ def estimate_cost_before_run(
                 review_prior_gap_context=gap_context,
             )
             gen_prompt_tokens += _count_message_tokens(messages, gen_model)
-    estimated_proposals = num_agents + prior_gap_count
+    # Upper bound: every reviewer uses its full critique allowance.
+    estimated_proposals = num_agents * routing.critiques_per_reviewer + prior_gap_count
     gen_completion_tokens = estimated_proposals * 150  # ~100 words + JSON overhead per proposal
 
     # Estimate scoring stage (2 passes per proposal)
@@ -8830,6 +9628,30 @@ def estimate_cost_before_run(
     meta_prompt_tokens = _count_text_tokens(review_text, meta_model) + estimated_proposals * 200 + 900
     meta_completion_tokens = 800  # Typical editorial report length
 
+    # Scale assumed output lengths for reasoning effort (planning heuristic).
+    # Generation, scoring, verification, rewrite, and labeling were calibrated
+    # without reasoning; escalation, triage, and the report at medium effort.
+    def _scaled(tokens: int, spec: str, calibrated: str) -> int:
+        return int(round(tokens * _reasoning_output_multiplier(spec, calibrated)))
+
+    evidence_completion_tokens = _scaled(evidence_completion_tokens, verification_model, "none")
+    # Generation may mix models; price it at the average over reviewers.
+    gen_worker_models = generation_models_for_workers(routing, max(1, num_agents))
+    gen_input_price = sum(
+        _lookup_pricing_model(spec)["input"] for spec in gen_worker_models
+    ) / len(gen_worker_models)
+    gen_output_price = sum(
+        _lookup_pricing_model(spec)["output"] * _reasoning_output_multiplier(spec, "none")
+        for spec in gen_worker_models
+    ) / len(gen_worker_models)
+    score_completion_tokens = _scaled(score_completion_tokens, score_model, "none")
+    verification_completion_tokens = _scaled(verification_completion_tokens, verification_model, "none")
+    rewrite_completion_tokens = _scaled(rewrite_completion_tokens, rewrite_model, "none")
+    cluster_completion_tokens = _scaled(cluster_completion_tokens, cluster_model, "none")
+    escalation_completion_tokens = _scaled(escalation_completion_tokens, escalation_model, "medium")
+    triage_completion_tokens = _scaled(triage_completion_tokens, triage_model, "medium")
+    meta_completion_tokens = _scaled(meta_completion_tokens, meta_model, "medium")
+
     # Calculate costs
     gen_pricing = _lookup_pricing_model(gen_model)
     score_pricing = _lookup_pricing_model(score_model)
@@ -8840,7 +9662,7 @@ def estimate_cost_before_run(
     triage_pricing = _lookup_pricing_model(triage_model)
     meta_pricing = _lookup_pricing_model(meta_model)
 
-    gen_cost = gen_prompt_tokens * gen_pricing["input"] + gen_completion_tokens * gen_pricing["output"]
+    gen_cost = gen_prompt_tokens * gen_input_price + gen_completion_tokens * gen_output_price
     score_cost = score_prompt_tokens * score_pricing["input"] + score_completion_tokens * score_pricing["output"]
     escalation_cost = escalation_prompt_tokens * escalation_pricing["input"] + escalation_completion_tokens * escalation_pricing["output"]
     verification_cost = verification_prompt_tokens * verification_pricing["input"] + verification_completion_tokens * verification_pricing["output"]
@@ -8860,7 +9682,7 @@ def estimate_cost_before_run(
         "estimated_total_cost_usd": total_cost,
         "stages": {
             "evidence_map": {"model": verification_model, "cost_usd": evidence_cost, "prompt_tokens": evidence_prompt_tokens, "completion_tokens": evidence_completion_tokens},
-            "generation": {"model": gen_model, "cost_usd": gen_cost, "prompt_tokens": gen_prompt_tokens, "completion_tokens": gen_completion_tokens},
+            "generation": {"model": _stage_model_label(gen_worker_models), "cost_usd": gen_cost, "prompt_tokens": gen_prompt_tokens, "completion_tokens": gen_completion_tokens},
             "scoring": {"model": score_model, "cost_usd": score_cost, "prompt_tokens": score_prompt_tokens, "completion_tokens": score_completion_tokens},
             "score_escalation": {"model": escalation_model, "cost_usd": escalation_cost, "prompt_tokens": escalation_prompt_tokens, "completion_tokens": escalation_completion_tokens},
             "verification": {"model": verification_model, "cost_usd": verification_cost, "prompt_tokens": verification_prompt_tokens, "completion_tokens": verification_completion_tokens},
@@ -8871,6 +9693,12 @@ def estimate_cost_before_run(
         },
         "note": "This is an estimate. Actual cost may vary based on proposal quality and lengths."
     }
+
+
+def _stage_cost_fully_reported(usage: Mapping[str, Any]) -> bool:
+    """True when the provider reported a dollar cost for every request in a stage."""
+    requests = usage.get("requests", 0)
+    return requests > 0 and usage.get("reported_cost_requests", 0) == requests
 
 
 def compute_actual_cost(
@@ -8902,6 +9730,10 @@ def compute_actual_cost(
         if stage_name == "embeddings":
             # Embedding pricing: $0.02 per 1M tokens for text-embedding-3-small
             cost = usage["prompt_tokens"] * 0.02 / 1e6
+            cost_source = "registry_prices"
+            if _stage_cost_fully_reported(usage):
+                cost = usage["reported_cost_usd"]
+                cost_source = "provider_reported"
             stages[stage_name] = {
                 "model": EMBEDDING_MODEL,
                 "prompt_tokens": usage["prompt_tokens"],
@@ -8909,20 +9741,37 @@ def compute_actual_cost(
                 "cached_tokens": 0,
                 "requests": usage["requests"],
                 "cost_usd": cost,
+                "cost_source": cost_source,
             }
             continue
 
         model = stage_models.get(stage_name, routing.generation)
-        pricing = _lookup_pricing_model(model)
-
         cached = usage.get("cached_tokens", 0)
-        non_cached_input = usage["prompt_tokens"] - cached
 
-        cost = (
-            non_cached_input * pricing["input"]
-            + cached * pricing["cached_input"]
-            + usage["completion_tokens"] * pricing["output"]
-        ) * chat_price_multiplier
+        def _priced(part: Mapping[str, Any], part_model: str) -> float:
+            pricing = _lookup_pricing_model(part_model)
+            part_cached = part.get("cached_tokens", 0)
+            return (
+                (part["prompt_tokens"] - part_cached) * pricing["input"]
+                + part_cached * pricing["cached_input"]
+                + part["completion_tokens"] * pricing["output"]
+            )
+
+        by_model = usage.get("by_model") or {}
+        if by_model and sum(part["requests"] for part in by_model.values()) == usage["requests"]:
+            # Price each model's share separately (mixed reviewer panel).
+            cost = sum(_priced(part, part_model) for part_model, part in by_model.items())
+            if len(by_model) > 1:
+                model = _stage_model_label(list(by_model))
+        else:
+            cost = _priced(usage, model)
+        cost *= chat_price_multiplier
+        cost_source = "registry_prices"
+        if _stage_cost_fully_reported(usage):
+            # OpenRouter returns the amount charged per request; prefer it
+            # over token counts times registry prices.
+            cost = usage["reported_cost_usd"]
+            cost_source = "provider_reported"
 
         stages[stage_name] = {
             "model": model,
@@ -8931,6 +9780,7 @@ def compute_actual_cost(
             "cached_tokens": cached,
             "requests": usage["requests"],
             "cost_usd": cost,
+            "cost_source": cost_source,
         }
 
     total_prompt = sum(s["prompt_tokens"] for s in stages.values())
@@ -9059,6 +9909,9 @@ async def full_feedback_pipeline(
     tracker.set_stage("generation")
     report_progress(2, total_steps, f"Generating proposals with {num_agents} agents...")
     cold_review_memory_context = "" if active_review_prior else review_memory_context
+    worker_models = generation_models_for_workers(routing, len(workers))
+    if len(set(worker_models)) > 1:
+        _progress(f"  Reviewer panel: {_stage_model_label(worker_models)}")
     proposals, failed_generations = await generate_all_proposals(
         review_text,
         workers,
@@ -9066,6 +9919,8 @@ async def full_feedback_pipeline(
         evidence_map=evidence_map,
         review_memory_context=cold_review_memory_context,
         tracker=tracker,
+        worker_models=worker_models,
+        max_critiques=routing.critiques_per_reviewer,
     )
 
     if failed_generations:
@@ -9330,6 +10185,7 @@ __all__ = [
     "extract_text_from_paper_file",
     "prepare_review_adjudication",
     "finalize_review_evaluation",
+    "_review_eval_generated_binding_context",
     "portable_review_eval_result",
     "portable_review_prior_eval_gate_result",
     "run_historical_review_eval",
@@ -9372,6 +10228,20 @@ __all__ = [
     "PROTECTED_ISSUE_FAMILIES",
     "json_schema_response_format",
     "ensure_api_key",
+    "llm_provider",
+    "ROUTING_PRESETS",
+    "GENERATION_PANEL",
+    "CRITIQUES_PER_REVIEWER",
+    "FEEDBACK_PROPOSAL_LIST_SCHEMA",
+    "generation_models_for_workers",
+    "REASONING_EFFORTS",
+    "MODEL_REASONING_OPTIONS",
+    "split_model_spec",
+    "model_reasoning_effort",
+    "provider_model_id",
+    "is_openai_model",
+    "get_openai_direct_client",
+    "OPENROUTER_BASE_URL",
     "get_client",
 ]
 
@@ -9550,7 +10420,61 @@ def main(argv: List[str] | None = None) -> int:
         "--agents", type=int, default=8, help="Number of agents (must be multiple of 8)"
     )
     parser.add_argument(
-        "--model", type=str, default=GENERATION_MODEL, choices=current_model_options()
+        "--model",
+        type=str,
+        default=None,
+        help=(
+            "Generation model, as MODEL or MODEL@EFFORT (for example "
+            "anthropic/claude-opus-5.5@high). Default: the routing preset's."
+        ),
+    )
+    parser.add_argument(
+        "--routing",
+        type=str,
+        default="default",
+        choices=list(ROUTING_PRESETS),
+        help="Routing preset for all stages. baseline-gpt-5.6 reproduces the 2026-08 baseline.",
+    )
+    parser.add_argument(
+        "--all-stages",
+        type=str,
+        default=None,
+        metavar="MODEL",
+        help="Use one model for every stage not given its own flag.",
+    )
+    for _flag, _stage in (
+        ("--scoring-model", "scoring"),
+        ("--verification-model", "evidence map and verification"),
+        ("--rewrite-model", "constrained rewrite"),
+        ("--clustering-model", "cluster labeling"),
+        ("--triage-model", "editorial triage"),
+        ("--meta-model", "final report"),
+        ("--escalation-model", "score escalation"),
+    ):
+        parser.add_argument(
+            _flag, type=str, default=None, metavar="MODEL", help=f"Model for {_stage}."
+        )
+    parser.add_argument(
+        "--panel",
+        type=str,
+        default=None,
+        metavar="MODELS",
+        help=(
+            "Comma-separated models rotated across reviewers, or 'none' for a single "
+            "generation model. Default: the routing preset's panel."
+        ),
+    )
+    parser.add_argument(
+        "--critiques-per-reviewer",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Most critiques one reviewer may return. Default: the routing preset's.",
+    )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="Print the allowed models with prices and reasoning efforts, then exit.",
     )
     parser.add_argument(
         "--top-k",
@@ -9698,10 +10622,19 @@ def main(argv: List[str] | None = None) -> int:
         help="Completed, hash-bound gold-adjudication CSV for paid manifest evaluation.",
     )
     parser.add_argument(
+        "--eval-gold-mode",
+        choices=("complete", "partial"),
+        default="complete",
+        help=(
+            "Gold-label gate: complete requires the full tier screen; partial "
+            "uses a hash-bound completed-row projection and reports non-exhaustive metrics."
+        ),
+    )
+    parser.add_argument(
         "--eval-generated-adjudication",
         type=str,
         default=None,
-        help="Completed generated top-five adjudication CSV used to finalize metrics.",
+        help="Completed generated up-to-five adjudication CSV used to finalize metrics.",
     )
     parser.add_argument(
         "--finalize-review-eval",
@@ -9739,6 +10672,42 @@ def main(argv: List[str] | None = None) -> int:
         help="Include held-out splits even if no matched paper PDF currently exists.",
     )
     args = parser.parse_args(cli_tokens)
+
+    if args.list_models:
+        for name in current_model_options():
+            spec = MODEL_REGISTRY[name]
+            efforts = MODEL_REASONING_OPTIONS.get(name, (None, None))[0]
+            print(
+                f"{name}: ${spec['input'] * 1e6:g} in / ${spec['output'] * 1e6:g} out per 1M tokens; "
+                f"efforts: {', '.join(efforts) if efforts else 'not listed'}"
+            )
+        return 0
+
+    try:
+        routing = build_model_routing(
+            gen_model=args.model,
+            scoring_model=args.scoring_model,
+            verification_model=args.verification_model,
+            rewrite_model=args.rewrite_model,
+            clustering_model=args.clustering_model,
+            editorial_triage_model=args.triage_model,
+            meta_model=args.meta_model,
+            escalation_model=args.escalation_model,
+            preset=args.routing,
+            all_stages_model=args.all_stages,
+            generation_panel=(
+                None
+                if args.panel is None
+                else []
+                if args.panel.strip().lower() == "none"
+                else [member.strip() for member in args.panel.split(",") if member.strip()]
+            ),
+            critiques_per_reviewer=args.critiques_per_reviewer,
+        )
+    except ValueError as e:
+        print(f"Model routing error: {e}", file=sys.stderr)
+        return 2
+    args.model = routing.generation
 
     operation_modes = {
         "--finalize-review-eval": bool(args.finalize_review_eval),
@@ -9787,6 +10756,12 @@ def main(argv: List[str] | None = None) -> int:
         )
     if option_was_used("--eval-memory-mode") and not args.eval_review_corpus:
         parser.error("--eval-memory-mode is only valid with --eval-review-corpus")
+    if option_was_used("--eval-gold-mode") and not (
+        args.eval_review_corpus or args.finalize_review_eval
+    ):
+        parser.error(
+            "--eval-gold-mode requires --eval-review-corpus or --finalize-review-eval"
+        )
     if args.eval_adjudication and not (
         args.eval_review_corpus or args.finalize_review_eval
     ):
@@ -9852,6 +10827,7 @@ def main(argv: List[str] | None = None) -> int:
                 args.eval_generated_adjudication,
                 args.finalize_review_eval,
                 output_path=args.eval_output,
+                gold_mode=args.eval_gold_mode,
             )
         except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as e:
             print(f"Review eval finalization error: {e}", file=sys.stderr)
@@ -9961,6 +10937,7 @@ def main(argv: List[str] | None = None) -> int:
                     "require_existing_pdf": not args.eval_allow_missing_pdf,
                     "num_agents": args.agents,
                     "gen_model": args.model,
+                    "routing": routing,
                     "top_k": args.top_k,
                     "review_prior_min_papers": args.review_prior_min_papers,
                     "review_prior_min_comments": args.review_prior_min_comments,
@@ -10016,10 +10993,12 @@ def main(argv: List[str] | None = None) -> int:
                     require_existing_pdf=not args.eval_allow_missing_pdf,
                     num_agents=args.agents,
                     gen_model=args.model,
+                    routing=routing,
                     top_k=args.top_k,
                     memory_mode=args.eval_memory_mode,
                     max_cost_usd=args.eval_max_cost_usd,
                     adjudication_path=args.eval_adjudication,
+                    gold_mode=args.eval_gold_mode,
                 )
             )
         except (FileNotFoundError, OSError, ValueError) as e:
@@ -10095,6 +11074,7 @@ def main(argv: List[str] | None = None) -> int:
                 paper_text,
                 num_agents=args.agents,
                 gen_model=args.model,
+                routing=routing,
                 top_k=args.top_k,
                 include_evidence_appendix=args.include_evidence_appendix,
                 include_audit_appendix=args.include_audit_appendix,

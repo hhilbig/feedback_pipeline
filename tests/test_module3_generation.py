@@ -124,6 +124,58 @@ class GenerationCallTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(mock_chat.call_args.kwargs["schema"], fp.FEEDBACK_PROPOSAL_SCHEMA)
         self.assertEqual(mock_chat.call_args.kwargs["schema_name"], "feedback_proposal")
 
+    async def test_panel_and_multiple_critiques_per_reviewer(self):
+        evidence = sample_evidence_map()
+        workers = fp.create_worker_assignments(8, design_type="difference_in_differences")[:3]
+
+        def critique(text):
+            return {
+                "id": 999,
+                "dimension": "logical_soundness",
+                "issue_family": "identification_design",
+                "affected_claim_ids": ["C001"],
+                "evidence_ids": ["P001"],
+                "support_status": "partial",
+                "severity": 4,
+                "confidence": "high",
+                "text": text,
+                "diagnostic_next_steps": ["Check pre-trends."],
+            }
+
+        returns = [
+            {"proposals": [critique("first"), critique("second"), critique("third")]},
+            {"proposals": [critique("only")]},
+            {"proposals": []},
+        ]
+        panel = ["gpt-6.1-sol@medium", "anthropic/claude-opus-5.5@medium", "google/gemini-4-carbon@medium"]
+
+        with patch("feedback_pipeline.chat_json_with_retry", new_callable=AsyncMock) as mock_chat:
+            mock_chat.side_effect = returns
+            proposals, failures = await fp.generate_all_proposals(
+                evidence["safe_text"],
+                workers,
+                model="gpt-6.1-sol@medium",
+                evidence_map=evidence,
+                worker_models=panel,
+                max_critiques=2,
+            )
+
+        self.assertEqual([call.kwargs["model"] for call in mock_chat.call_args_list], panel)
+        self.assertIs(mock_chat.call_args.kwargs["schema"], fp.FEEDBACK_PROPOSAL_LIST_SCHEMA)
+        prompt = mock_chat.call_args.args[0][1]["content"]
+        self.assertIn('"proposals": a list of 1 to 2 critiques', prompt)
+        # Third critique from the first reviewer is cut at the limit of two.
+        self.assertEqual([p["text"] for p in proposals], ["first", "second", "only"])
+        self.assertEqual(len({p["id"] for p in proposals}), 3)
+        self.assertEqual(proposals[0]["id"], workers[0]["id"])
+        self.assertEqual(proposals[1]["reviewer_id"], workers[0]["id"])
+        self.assertEqual(proposals[1]["critique_rank"], 2)
+        self.assertEqual(proposals[1]["generation_model"], panel[0])
+        self.assertEqual(proposals[2]["generation_model"], panel[1])
+        # A reviewer that returns no critique is reported as failed.
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["worker"]["id"], workers[2]["id"])
+
 
 if __name__ == "__main__":
     unittest.main()

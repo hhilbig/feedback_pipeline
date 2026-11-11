@@ -235,6 +235,146 @@ class GoldPacketTests(unittest.TestCase):
             )
 
 
+class PartialGoldProjectionTests(unittest.TestCase):
+    @staticmethod
+    def rows():
+        common = {
+            "packet_version": ra.PACKET_VERSION,
+            "binding_hash": "source-binding",
+            "family_id": "private-family",
+            "duplicate_cluster_ids": "[]",
+        }
+        return [
+            {
+                **common,
+                "cluster_id": "major-complete",
+                "full_adjudication_required": "yes",
+                "tier_screen": "major",
+                "include": "yes",
+                "canonical_issue": "The design lacks a credible comparison group.",
+                "severity": "major_revision_issue",
+                "evidentiary_support": "supported",
+            },
+            {
+                **common,
+                "cluster_id": "minor-tier-only",
+                "full_adjudication_required": "no",
+                "tier_screen": "minor",
+            },
+            {
+                **common,
+                "cluster_id": "excluded-complete",
+                "full_adjudication_required": "no",
+                "tier_screen": "exclude",
+                "include": "no",
+                "exclusion_reason": "Boilerplate only.",
+            },
+            {
+                **common,
+                "cluster_id": "unscreened",
+                "full_adjudication_required": "no",
+                "tier_screen": "",
+            },
+        ]
+
+    @staticmethod
+    def validation(rows, status="pending_human_adjudication"):
+        return {
+            "status": status,
+            "binding_hash": "source-binding",
+            "rows": deepcopy(rows),
+        }
+
+    def test_projection_is_deterministic_and_uses_only_completed_rows(self):
+        rows = self.rows()
+        forward = ra.project_partial_gold_adjudication(self.validation(rows))
+        reverse = ra.project_partial_gold_adjudication(
+            self.validation(list(reversed(rows)))
+        )
+
+        self.assertEqual(forward["binding_hash"], reverse["binding_hash"])
+        self.assertEqual(
+            [row["cluster_id"] for row in forward["rows"]],
+            ["major-complete"],
+        )
+        self.assertEqual(forward["coverage"]["total_cluster_count"], 4)
+        self.assertEqual(forward["coverage"]["adjudicated_cluster_count"], 3)
+        self.assertEqual(forward["coverage"]["unadjudicated_cluster_count"], 1)
+        self.assertEqual(forward["coverage"]["full_required_count"], 1)
+        self.assertEqual(forward["coverage"]["full_required_completed_count"], 1)
+        self.assertEqual(forward["coverage"]["eligible_scoring_cluster_count"], 1)
+        self.assertFalse(forward["exhaustive_major_recall"])
+
+    def test_projection_requires_full_rows_and_rejects_invalid_source(self):
+        rows = self.rows()
+        rows[0]["canonical_issue"] = ""
+        with self.assertRaisesRegex(ValueError, "full-adjudication"):
+            ra.project_partial_gold_adjudication(self.validation(rows))
+
+        promoted = self.rows()
+        promoted[3]["tier_screen"] = "major"
+        with self.assertRaisesRegex(ValueError, "promoted major"):
+            ra.project_partial_gold_adjudication(self.validation(promoted))
+
+        for status in ("invalid", "stale"):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(ValueError, "current, valid"):
+                    ra.project_partial_gold_adjudication(
+                        self.validation(self.rows(), status=status)
+                    )
+
+    def test_binding_tracks_selection_and_substantive_labels_but_not_notes(self):
+        rows = self.rows()
+        baseline = ra.project_partial_gold_adjudication(self.validation(rows))
+
+        notes = deepcopy(rows)
+        notes[0]["adjudicator_notes"] = "A private working note."
+        self.assertEqual(
+            baseline["binding_hash"],
+            ra.project_partial_gold_adjudication(self.validation(notes))["binding_hash"],
+        )
+
+        relabeled = deepcopy(rows)
+        relabeled[0]["canonical_issue"] = "The comparison group is not credible."
+        self.assertNotEqual(
+            baseline["binding_hash"],
+            ra.project_partial_gold_adjudication(self.validation(relabeled))["binding_hash"],
+        )
+
+        expanded = deepcopy(rows)
+        expanded[3]["tier_screen"] = "minor"
+        self.assertNotEqual(
+            baseline["binding_hash"],
+            ra.project_partial_gold_adjudication(self.validation(expanded))["binding_hash"],
+        )
+
+        duplicate_order = deepcopy(rows)
+        for index in (1, 2):
+            duplicate_order[index].update(
+                {
+                    "full_adjudication_required": "yes",
+                    "tier_screen": "minor",
+                    "include": "yes",
+                    "canonical_issue": f"Minor issue {index}.",
+                    "severity": "minor_revision_issue",
+                    "evidentiary_support": "supported",
+                }
+            )
+        duplicate_order[0]["duplicate_cluster_ids"] = json.dumps(
+            ["minor-tier-only", "excluded-complete"]
+        )
+        other_order = deepcopy(duplicate_order)
+        other_order[0]["duplicate_cluster_ids"] = '[ "excluded-complete", "minor-tier-only" ]'
+        self.assertEqual(
+            ra.project_partial_gold_adjudication(self.validation(duplicate_order))[
+                "binding_hash"
+            ],
+            ra.project_partial_gold_adjudication(self.validation(other_order))[
+                "binding_hash"
+            ],
+        )
+
+
 class GeneratedPacketTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -369,6 +509,130 @@ class GeneratedPacketTests(unittest.TestCase):
         self.assertEqual(len({row["generated_issue_id"] for row in selected}), 2)
         self.assertTrue(all(row["generated_issue_id"].startswith("GI_") for row in selected))
 
+    def test_packet_roundtrips_five_cases_with_up_to_five_rows(self):
+        generated = []
+        counts = {
+            "family-e": 5,
+            "family-a": 5,
+            "family-d": 4,
+            "family-b": 4,
+            "family-c": 5,
+        }
+        full_text = "Detailed concern. " + ("x" * 1400) + " FULL_TEXT_TAIL"
+        for family, count in counts.items():
+            for rank in range(1, count + 1):
+                generated.append(
+                    {
+                        "family_id": family,
+                        "case_id": f"{family}-case",
+                        "id": f"{family}-{rank}",
+                        "rank": rank,
+                        "text": (
+                            full_text
+                            if family == "family-e" and rank == 1
+                            else f"Concern {rank} for {family}."
+                        ),
+                        "evidence_ids": [f"P{rank:03d}"],
+                    }
+                )
+        context = {"top_k_policy": "up_to_k"}
+        packet = ra.write_generated_adjudication_packet(
+            generated,
+            self.gold,
+            self.tmp.name,
+            run_binding_context=context,
+            private_root=self.tmp.name,
+        )
+        self.assertEqual(packet["row_count"], 23)
+        self.assertEqual(
+            {
+                family: [
+                    row["rank"]
+                    for row in packet["rows"]
+                    if row["family_id"] == family
+                ]
+                for family in counts
+            },
+            {family: list(range(1, count + 1)) for family, count in counts.items()},
+        )
+        preserved = next(
+            row
+            for row in packet["rows"]
+            if row["family_id"] == "family-e" and row["rank"] == 1
+        )
+        self.assertEqual(preserved["generated_text"], full_text)
+        self.assertEqual(json.loads(preserved["evidence_ids"]), ["P001"])
+        self.assertEqual(stat.S_IMODE(os.stat(packet["csv_path"]).st_mode), 0o600)
+
+        def complete(row):
+            row.update(
+                {
+                    "correctness": "correct",
+                    "significance": "significant",
+                    "evidence_sufficiency": "sufficient",
+                    "human_match_status": "unmatched",
+                    "confirmed_human_cluster_ids": "[]",
+                    "duplicate_status": "unique",
+                    "valid_novelty": "no",
+                }
+            )
+
+        rewrite_csv(packet["csv_path"], complete)
+        ready = ra.load_generated_adjudication(
+            packet["csv_path"],
+            expected_binding_hash=packet["binding_hash"],
+            expected_gold_binding_hash=self.gold["binding_hash"],
+            run_binding_context=context,
+            private_root=self.tmp.name,
+            top_k=5,
+        )
+        self.assertEqual(ready["status"], "ready")
+
+        rows = ready["rows"]
+        gap = deepcopy(rows)
+        next(
+            row
+            for row in gap
+            if row["family_id"] == "family-b" and row["rank"] == "4"
+        )["rank"] = "5"
+        invalid_gap = ra.validate_generated_rows(gap, top_k=5)
+        self.assertEqual(invalid_gap["status"], "invalid")
+        self.assertTrue(any("contiguous" in error for error in invalid_gap["errors"]))
+
+        too_high = deepcopy(rows)
+        too_high[-1]["rank"] = 6
+        invalid_high = ra.validate_generated_rows(too_high, top_k=5)
+        self.assertEqual(invalid_high["status"], "invalid")
+        self.assertTrue(any("must not exceed" in error for error in invalid_high["errors"]))
+
+        duplicate_rank = deepcopy(rows)
+        next(
+            row
+            for row in duplicate_rank
+            if row["family_id"] == "family-b" and row["rank"] == "4"
+        )["rank"] = "3"
+        invalid_duplicate = ra.validate_generated_rows(duplicate_rank, top_k=5)
+        self.assertEqual(invalid_duplicate["status"], "invalid")
+        self.assertTrue(
+            any("rank must be unique" in error for error in invalid_duplicate["errors"])
+        )
+
+        rewrite_csv(
+            packet["csv_path"],
+            lambda row: row.update({"pipeline_issue_id": "tampered-id"})
+            if row["family_id"] == "family-e" and row["rank"] == "1"
+            else None,
+        )
+        with self.assertRaisesRegex(ValueError, "immutable fields"):
+            ra.load_generated_adjudication(
+                packet["csv_path"],
+                expected_binding_hash=packet["binding_hash"],
+                expected_gold_binding_hash=self.gold["binding_hash"],
+                run_binding_context=context,
+                private_root=self.tmp.name,
+                top_k=5,
+            )
+
 
 class AggregateMetricTests(unittest.TestCase):
     def test_metrics_are_primary_macro_separate_secondary_and_privacy_safe(self):
@@ -484,6 +748,136 @@ class AggregateMetricTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "pending_human_adjudication")
         self.assertEqual(result["generated_pending_count"], 1)
+
+    def test_partial_metrics_are_labeled_and_preserve_coverage(self):
+        gold_validation = {
+            "status": "ready",
+            "gold_mode": "partial",
+            "evaluation_scope": "partial_gold_pilot",
+            "coverage": {
+                "total_cluster_count": 145,
+                "adjudicated_cluster_count": 52,
+                "eligible_scoring_cluster_count": 30,
+            },
+            "rows": [
+                {
+                    "family_id": "private-family",
+                    "cluster_id": "major-1",
+                    "tier_screen": "major",
+                    "include": "yes",
+                    "sampled_minor": "no",
+                    "duplicate_cluster_ids": "[]",
+                }
+            ],
+        }
+        generated_validation = {
+            "status": "ready",
+            "rows": [
+                {
+                    "family_id": "private-family",
+                    "case_id": "case",
+                    "rank": 1,
+                    "generated_issue_id": "g1",
+                    "correctness": "correct",
+                    "significance": "significant",
+                    "evidence_sufficiency": "sufficient",
+                    "human_match_status": "matched",
+                    "confirmed_human_cluster_ids": '["major-1"]',
+                    "duplicate_status": "unique",
+                    "valid_novelty": "no",
+                }
+            ],
+        }
+        result = ra.compute_privacy_safe_metrics(
+            gold_validation,
+            generated_validation,
+            family_metadata={
+                "private-family": {
+                    "public_family_id": "F01",
+                    "benchmark_tier": "primary",
+                }
+            },
+        )
+
+        self.assertEqual(result["status"], "partial_gold_pilot")
+        self.assertFalse(result["exhaustive_major_recall"])
+        self.assertEqual(result["denominator_scope"], "adjudicated_clusters_only")
+        self.assertEqual(result["gold_coverage"]["adjudicated_cluster_count"], 52)
+        self.assertNotIn("primary_family_macro_major_cluster_recall_at_5", result)
+        self.assertEqual(
+            result[
+                "adjudicated_subset_primary_family_macro_major_cluster_recall_at_5"
+            ],
+            1.0,
+        )
+        self.assertNotIn("private-family", json.dumps(result))
+
+        pending = ra.compute_privacy_safe_metrics(
+            gold_validation,
+            {"status": "pending_human_adjudication", "pending_fields": ["g1"]},
+        )
+        self.assertEqual(pending["status"], "pending_human_adjudication")
+        self.assertEqual(pending["evaluation_scope"], "partial_gold_pilot")
+        self.assertEqual(pending["gold_coverage"]["total_cluster_count"], 145)
+
+    def test_up_to_five_metrics_count_missing_slots_as_misses(self):
+        gold_validation = {
+            "status": "ready",
+            "gold_mode": "partial",
+            "coverage": {"total_cluster_count": 4, "adjudicated_cluster_count": 4},
+            "rows": [
+                {
+                    "family_id": "private-family",
+                    "cluster_id": "major-1",
+                    "tier_screen": "major",
+                    "include": "yes",
+                    "sampled_minor": "no",
+                    "duplicate_cluster_ids": "[]",
+                }
+            ],
+        }
+        generated_rows = []
+        for rank in range(1, 5):
+            generated_rows.append(
+                {
+                    "family_id": "private-family",
+                    "case_id": "case",
+                    "rank": rank,
+                    "generated_issue_id": f"g{rank}",
+                    "correctness": "correct" if rank <= 3 else "incorrect",
+                    "significance": "significant" if rank <= 3 else "not_significant",
+                    "evidence_sufficiency": "sufficient" if rank <= 3 else "insufficient",
+                    "human_match_status": "matched" if rank == 1 else "unmatched",
+                    "confirmed_human_cluster_ids": '["major-1"]' if rank == 1 else "[]",
+                    "duplicate_status": "duplicate" if rank == 2 else "unique",
+                    "duplicate_of_generated_id": "g1" if rank == 2 else "",
+                    "valid_novelty": "yes" if rank == 3 else "no",
+                }
+            )
+        result = ra.compute_privacy_safe_metrics(
+            gold_validation,
+            {"status": "ready", "rows": generated_rows},
+            family_metadata={
+                "private-family": {
+                    "public_family_id": "F01",
+                    "benchmark_tier": "primary",
+                    "case_count": 1,
+                }
+            },
+            top_k=5,
+            output_cardinality_mode="up_to_k",
+        )
+
+        self.assertEqual(result["primary_supported_significant_precision_at_5"], 0.6)
+        self.assertEqual(result["primary_valid_novelty_yield_at_5"], 0.2)
+        self.assertEqual(result["primary_duplicate_rate_among_returned_at_5"], 0.25)
+        self.assertEqual(result["primary_evaluation_slot_count"], 5)
+        self.assertEqual(result["total_generated_issue_count"], 4)
+        self.assertEqual(result["total_unfilled_issue_slot_count"], 1)
+        self.assertEqual(
+            result["families"][0]["adjudicated_major_cluster_recall_at_5"],
+            1.0,
+        )
 
     def test_manual_duplicate_clusters_are_one_recall_target(self):
         gold_validation = {

@@ -181,9 +181,12 @@ st.set_page_config(
 )
 
 # Check for API key
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    st.error("OPENAI_API_KEY not found in environment. Add it to your .env file.")
+try:
+    from feedback_pipeline import ensure_api_key
+
+    ensure_api_key()
+except (RuntimeError, ValueError) as exc:
+    st.error(str(exc))
     st.stop()
 
 # --- Session State Initialization ---
@@ -302,17 +305,51 @@ verifies each critique against cited evidence, and only then synthesizes the fin
 with st.sidebar:
     st.header("Settings")
 
-    from feedback_pipeline import GENERATION_MODEL, current_model_options
+    from feedback_pipeline import (
+        MODEL_REASONING_OPTIONS,
+        ROUTING_PRESETS,
+        build_model_routing,
+        current_model_options,
+    )
 
-    model_options = current_model_options()
-    model = st.selectbox(
-        "Model",
-        options=model_options,
-        index=model_options.index(GENERATION_MODEL),
+    routing_preset = st.selectbox(
+        "Routing preset",
+        options=list(ROUTING_PRESETS),
         help=(
-            "Generation model. Other stages are routed automatically: "
-            "cheap models for routine scoring/formatting and frontier models for triage/reporting."
+            "Models for all stages. 'default' uses the GPT-6.1 family with reasoning on; "
+            "'baseline-gpt-5.6' reproduces the earlier routing."
         ),
+    )
+    preset_default_label = "(preset default)"
+    gen_choice = st.selectbox(
+        "Generation model",
+        options=[preset_default_label] + current_model_options(),
+        help=(
+            "One model for all reviewers. The preset default rotates reviewers across "
+            "vendors. Other stages follow the routing preset."
+        ),
+    )
+    gen_spec = None
+    if gen_choice != preset_default_label:
+        efforts = MODEL_REASONING_OPTIONS.get(gen_choice, (None, None))[0]
+        gen_spec = gen_choice
+        if efforts:
+            effort_default_label = "(model default)"
+            effort = st.selectbox(
+                "Generation reasoning effort",
+                options=[effort_default_label] + list(efforts),
+            )
+            if effort != effort_default_label:
+                gen_spec = f"{gen_choice}@{effort}"
+    routing = build_model_routing(gen_model=gen_spec, preset=routing_preset)
+    model = routing.generation
+    generation_label = (
+        " + ".join(routing.generation_panel) if routing.generation_panel else routing.generation
+    )
+    st.caption(
+        f"Generation: `{generation_label}` (up to {routing.critiques_per_reviewer} per reviewer) · "
+        f"scoring: `{routing.scoring}` · "
+        f"verification: `{routing.verification}` · report: `{routing.meta_review}`"
     )
 
     agents = st.select_slider(
@@ -437,6 +474,7 @@ else:
         paper_text,
         num_agents=agents,
         gen_model=model,
+        routing=routing,
         top_k=top_k,
     )
     estimated_cost = estimate["estimated_total_cost_usd"]
@@ -463,6 +501,7 @@ if st.button("Generate Feedback", type="primary", disabled=not can_run):
                 paper_text,
                 num_agents=agents,
                 gen_model=model,
+                routing=routing,
                 top_k=top_k,
                 include_evidence_appendix=(review_mode == "Comprehensive audit"),
                 include_audit_appendix=(review_mode == "Comprehensive audit"),

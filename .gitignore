@@ -27,3 +27,6 @@ review_eval*.json
 
 # Feedback history (stored in home directory, but ignore if copied here)
 .feedback_llm/
+
+# Local display names for private papers
+*.local.json

@@ -4,20 +4,34 @@ AI-assisted feedback for quantitative social science papers. The pipeline is evi
 
 ## Getting Started
 
-### Step 1: Get an OpenAI API Key
+### Step 1: Get an API Key
 
-1. Go to [platform.openai.com](https://platform.openai.com)
-2. Sign up or log in
-3. Go to API Keys and create a new key
-4. Copy the key
+The pipeline calls models through [OpenRouter](https://openrouter.ai), which
+gives one key access to OpenAI, Anthropic, Google, and other vendors. Create a
+key under Keys in your OpenRouter account.
+
+To call OpenAI directly instead, create a key at
+[platform.openai.com](https://platform.openai.com). Only OpenAI models are
+available that way.
 
 ### Step 2: Save Your API Key
 
 Create a file called `.env` in this folder:
 
 ```text
+OPENROUTER_API_KEY=sk-or-your-key-here
+```
+
+A key saved in `~/.openrouter_api_key` is also found. For direct OpenAI access
+use:
+
+```text
+LLM_PROVIDER=openai
 OPENAI_API_KEY=sk-your-key-here
 ```
+
+Without `LLM_PROVIDER`, OpenRouter is used when an OpenRouter key exists and
+OpenAI otherwise.
 
 ### Step 3: Run the App
 
@@ -50,20 +64,40 @@ The current pipeline has nine stages:
 
 | Setting | What it does |
 |---------|--------------|
-| **Model** | Generation model. Other stages route automatically to cheaper or stronger models. |
+| **Routing preset** | Models for all stages. `default` or `baseline-gpt-5.6`. |
+| **Generation model** | Optional override for the reviewer panel, with its reasoning effort. Other stages follow the preset. |
 | **Number of Agents** | More agents increase breadth and cost. Must be a multiple of 8. |
 | **Top-K Proposals** | Number of top insights emphasized in the final report. |
 | **Review mode** | Editorial triage shows clear problems with rejection-risk labels. Comprehensive audit also appends deterministic coverage and evidence appendices. |
 
-Default routing uses `gpt-5.6-terra` for generation, scoring, and verification, `gpt-5.6-luna` for constrained rewrites and simple labeling, and `gpt-5.6-sol` for editorial triage, meta-review, and escalations. Reasoning effort is explicitly `none` for Terra/Luna and `medium` for Sol to preserve the effective behavior of the previous routing.
+Default routing uses the GPT-6.1 family with reasoning switched on where the paper is judged: `gpt-6.1-sol@medium` for generation, editorial triage, the final report, and escalations; `gpt-6.1-sol@low` for the evidence map and verification; `gpt-6.1-terra@low` for scoring; and `gpt-6-luna@none` for constrained rewrites and labeling. The part after `@` is the reasoning effort.
 
-Cost note: each run uses the paid OpenAI API. The app shows an estimate before a run and actual usage afterward.
+The eight reviewers rotate across three vendors' models (`gpt-6.1-sol`, `anthropic/claude-opus-5.5`, `google/gemini-4-carbon`, each at medium effort), because different models catch different problems. Each reviewer returns one critique and may add a second if it is a distinct, well-supported problem. `--panel a,b,c` sets another panel, `--panel none` uses a single generation model, and `--critiques-per-reviewer N` changes the limit. The panel needs OpenRouter; with direct OpenAI access all reviewers use `gpt-6.1-sol`.
+
+The earlier routing (GPT-5.6, no reasoning in generation, scoring, or verification, one model, one critique per reviewer) is kept as a preset: `--routing baseline-gpt-5.6`.
+
+Every stage can be set separately:
+
+```bash
+python -m feedback_pipeline --list-models
+python -m feedback_pipeline --file paper.txt --model anthropic/claude-opus-5.5@high
+python -m feedback_pipeline --file paper.txt --verification-model google/gemini-4-carbon@medium --meta-model anthropic/claude-fable-5.2
+python -m feedback_pipeline --file paper.txt --all-stages gpt-6.1-terra@low
+```
+
+`--model` sets one generation model for all reviewers and switches the panel off. The other flags are `--scoring-model`, `--verification-model`, `--rewrite-model`, `--clustering-model`, `--triage-model`, `--meta-model`, and `--escalation-model`. Pre-run estimates scale assumed output length by reasoning effort using a rough rule, so they are less exact for high efforts.
+
+The model list also includes the GPT-6 family and, through OpenRouter, Claude, Gemini, Grok, Kimi, Qwen, Mistral, and DeepSeek models (`--model anthropic/claude-sonnet-5.5`). To add a model, add its OpenRouter slug and prices to `MODEL_REGISTRY`.
+
+OpenRouter requests exclude hosts that may store or train on prompts. Set `OPENROUTER_DATA_COLLECTION=allow` to lift that restriction. Batch API mode always calls OpenAI directly and needs `OPENAI_API_KEY` and OpenAI models.
+
+Cost note: each run uses a paid API. The app shows an estimate before a run and actual usage afterward. With OpenRouter, the actual figure is the cost OpenRouter reports per request.
 
 ## Troubleshooting
 
-**"OPENAI_API_KEY not found"**
+**"No OpenRouter API key found" or "OPENAI_API_KEY is missing"**
 - Make sure `.env` exists in this folder.
-- Make sure it contains `OPENAI_API_KEY=sk-...` with no spaces around `=`.
+- Make sure it contains `OPENROUTER_API_KEY=sk-or-...` (or `OPENAI_API_KEY=sk-...` with `LLM_PROVIDER=openai`) with no spaces around `=`.
 
 **App will not start**
 - Check that Python 3 is installed: `python3 --version`.
@@ -127,6 +161,15 @@ python -m feedback_pipeline \
   --eval-memory-mode none \
   --eval-output outputs/review_eval_plan.json
 
+# Estimate the explicit partial-gold pilot from completed labels only.
+# This also makes no API calls and reports completed and scoring denominators.
+python -m feedback_pipeline \
+  --eval-review-corpus ~/.feedback_llm/review_manifest.json \
+  --eval-memory-mode none \
+  --eval-adjudication ~/.feedback_llm/adjudication/private_feedback_pilot_v1/gold_adjudication.csv \
+  --eval-gold-mode partial \
+  --eval-output outputs/review_eval_partial_plan.json
+
 # Paid mode requires completed, current gold labels and an explicit dollar ceiling.
 python -m feedback_pipeline \
   --eval-review-corpus ~/.feedback_llm/review_manifest.json \
@@ -137,6 +180,7 @@ python -m feedback_pipeline \
   --eval-run-api
 
 # After labeling generated_adjudication.csv, finalize privacy-safe metrics offline.
+# Pass --eval-gold-mode partial here if the paid run used partial gold.
 python -m feedback_pipeline \
   --review-corpus ~/.feedback_llm/review_manifest.json \
   --eval-adjudication ~/.feedback_llm/adjudication/private_feedback_pilot_v1/gold_adjudication.csv \
@@ -190,13 +234,57 @@ contains only a pseudonymous example manifest. Saved evaluation JSON is a
 path-free aggregate projection; human feedback and generated issue text remain
 in the ignored local adjudication artifacts.
 
+To label either private packet without editing CSV cells, double-click
+`run_adjudication_app.command`, or run:
+
+```bash
+streamlit run adjudication_app.py \
+  --server.address 127.0.0.1 \
+  --browser.gatherUsageStats false
+```
+
+When a canonical `generated_adjudication.csv` exists, the app opens the generated
+issue workflow by default. It shows the full critique, cited evidence IDs, the
+five ranked critiques for that manuscript, and any same-family lexical match
+suggestion. For each issue, label correctness, significance, evidence
+sufficiency, human-cluster match, duplication, and valid novelty. **Save and
+next** moves to the next unfinished issue.
+
+Use the **Task** switch for the historical-feedback workflow. That screen shows
+one gold cluster at a time; start with **Full labels**, then use **Tier screen**
+for the remaining quick decisions. Both workflows write only their designated
+label fields to the private CSV. The app rechecks the source, gold, and baseline
+bindings before each save, makes no API calls, and refuses files outside
+`~/.feedback_llm/`.
+
 Gold validation has two passes. Every deduplicated cluster receives a quick
 major/minor/exclude screen. Full fields are required for every major cluster and
 for five deterministically sampled minor clusters per family (seed `20260802`).
-After a paid run, every final top-five generated issue receives manual labels for
-correctness, significance, evidence support, duplication, human-cluster match,
-and valid novelty. The paid result remains `pending_human_adjudication` until
-those labels are complete. Changing a source, extraction rule, manuscript, or
-cluster invalidates the corresponding labels.
+Strict evaluation remains the default and requires the complete tier screen.
+`--eval-gold-mode partial` is an explicit exploratory alternative. It runs only
+after every sampled row and every row screened as major has complete labels. It
+uses fully adjudicated included rows as scoring targets, reports all completed
+screens as coverage, and never describes major-cluster recall as exhaustive.
+Changing a completed label or completing another row changes the partial binding
+and invalidates any generated-issue packet from the earlier state.
+
+After a paid run, every real final post-verification issue, up to five per case,
+receives manual labels for correctness, significance, evidence support,
+duplication, human-cluster match, and valid novelty. A successful benchmark case
+must return at least one issue; the runner never creates placeholder rows. Missing
+slots count as misses for supported-significant precision@5 and valid-novelty
+yield@5. Recall keeps the human-cluster denominator, and duplicate rate is
+calculated among returned issues only.
+
+The runner atomically rewrites a private in-progress packet after each completed
+case and creates a content-addressed private checkpoint before the final audit.
+The canonical `generated_adjudication.csv` is written only after all run gates
+pass. Generated text and evidence IDs therefore remain recoverable after an
+interruption or failed audit but never enter portable output. A completed paid
+result remains `pending_human_adjudication` until every returned issue is labeled.
+Manifest runs do not calculate provisional recall against raw feedback; scoring
+begins only after these manual labels are complete. Changing a source, extraction
+rule, manuscript, cluster, output-cardinality policy, or generated issue
+invalidates the corresponding labels.
 
 See [DESIGN.md](DESIGN.md) for implementation details.
