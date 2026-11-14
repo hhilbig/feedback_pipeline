@@ -18,3 +18,7 @@ The manuscript is sent to the model providers. By default, OpenRouter requests e
 ## More detail
 
 [docs/usage.md](docs/usage.md) describes the nine pipeline stages, the model settings, the command-line options, and the evaluation tools. [DESIGN.md](DESIGN.md) explains the design choices.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
