@@ -1,6 +1,6 @@
 # Paper Feedback Pipeline
 
-An experimental tool that uses language models to comment on drafts of quantitative social science papers. It is a work in progress. I have not yet tested whether its comments are accurate or useful, so treat the output as a list of things to check, not as a review.
+A tool that uses language models to comment on drafts of quantitative social science papers. It is a work in progress. I have not yet tested whether its comments are accurate or useful, so treat the output as a list of things to check, not as a review.
 
 The pipeline reads a manuscript, asks several models to write critiques from different perspectives (theory, rival explanations, methods, research design, editing), checks each critique against the text of the paper, and combines the remaining points into a short report.
 
